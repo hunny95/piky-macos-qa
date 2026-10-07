@@ -274,7 +274,7 @@ collect)
     echo "== spctl --status"; spctl --status 2>&1 || true
     echo "== runner"; echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-} label=${QA_RUNNER_LABEL:-} environment=${RUNNER_ENVIRONMENT:-}"
   } > "$QA_EVIDENCE/os/machine.txt" 2>&1
-  [ -f "$QA_STATE/authorization-rules.txt" ] && cp "$QA_STATE/authorization-rules.txt" "$QA_EVIDENCE/os/authorization-rules.txt"
+  if [ -f "$QA_STATE/authorization-rules.txt" ]; then cp "$QA_STATE/authorization-rules.txt" "$QA_EVIDENCE/os/authorization-rules.txt" || true; fi
   # What the tester saved: notes and screenshots. No applications, disk images or archives.
   if [ -d "$QA_KIT/Results" ]; then
     find "$QA_KIT/Results" -type f -size -40000k \
@@ -284,7 +284,7 @@ collect)
   # What TestReceiver was handed (QA fixtures only).
   cp "$HOME/Library/Logs/PIKY QA TestReceiver/received.jsonl" "$QA_EVIDENCE/receiver/" 2>/dev/null || true
   # PIKY's own content-free records.
-  [ -d "$HOME/Library/Application Support/PIKY/Diagnostics" ] && cp -R "$HOME/Library/Application Support/PIKY/Diagnostics" "$QA_EVIDENCE/piky-diagnostics" 2>/dev/null
+  if [ -d "$HOME/Library/Application Support/PIKY/Diagnostics" ]; then cp -R "$HOME/Library/Application Support/PIKY/Diagnostics" "$QA_EVIDENCE/piky-diagnostics" 2>/dev/null || true; fi
   {
     for QA_FILE in "$HOME/Downloads"/PIKY-*.dmg; do
       [ -f "$QA_FILE" ] || continue
@@ -313,7 +313,8 @@ collect)
     load_credentials
     for QA_SECRET in "$ADMIN_PASSWORD" "$RUSTDESK_PASSWORD" "${QA_SESSION_PASSPHRASE:-}"; do
       [ -n "$QA_SECRET" ] || continue
-      LC_ALL=C grep -rlF -- "$QA_SECRET" "$QA_EVIDENCE" 2>/dev/null | while IFS= read -r QA_FILE; do
+      # grep answers 1 when it finds nothing, which is the good case: that must not end the step.
+      { LC_ALL=C grep -rlF -- "$QA_SECRET" "$QA_EVIDENCE" 2>/dev/null || true; } | while IFS= read -r QA_FILE; do
         rm -f "$QA_FILE"
         echo "::warning::A file of the evidence held a session credential and was removed: $(basename "$QA_FILE")"
       done
