@@ -105,6 +105,54 @@ def focus_piky_window(title):
     return True
 
 
+def into_view(app, owner, *selector):
+    """Scrolls an application's window with the wheel until an element is
+    inside it, as a person scrolls down to a button. Returns the element once
+    its middle is within the window, else None."""
+    for attempt in range(22):
+        elements = find(app, *selector)
+        panes = [window for window in windows(owner) if window["bounds"][2] > 300 and window["bounds"][3] > 200]
+        if not panes:
+            return None
+        box = panes[0]["bounds"]
+        spot = "%.0f,%.0f" % (box[0] + box[2] * 0.68, box[1] + box[3] * 0.55)
+        frame = elements[0].get("frame") if elements else None
+        if not usable(frame):
+            # Not built yet (lists are made as they scroll into view): look further down.
+            qa("scroll", "-14", "--at", spot, quiet=True)
+            pause(0.6)
+            continue
+        x, y = center(frame)
+        top, bottom = box[1] + 60, box[1] + box[3] - 24
+        if top <= y <= bottom and box[0] <= x <= box[0] + box[2]:
+            return elements[0]
+        distance = y - bottom if y > bottom else y - top
+        lines = max(2, min(30, int(abs(distance) / 9) + 1))
+        qa("scroll", str(-lines if distance > 0 else lines), "--at", spot, quiet=True)
+        pause(0.6)
+    return None
+
+
+def drag_into_applications():
+    """The gesture the disk image's window asks for: PIKY's icon dragged onto
+    the Applications shortcut beside it, with the pointer."""
+    icons = [item for item in find("com.apple.finder", "--role", "AXImage", "--title", "PIKY", all=True) if usable(item.get("frame")) and item["frame"][3] >= 40]
+    targets = [item for item in find("com.apple.finder", "--role", "AXImage", "--title", "Applications", all=True) if usable(item.get("frame")) and item["frame"][3] >= 40]
+    if not icons or not targets:
+        return False
+    (sx, sy), (tx, ty) = center(icons[0]["frame"]), center(targets[0]["frame"])
+    qa("drag", "%.0f" % sx, "%.0f" % sy, "%.0f" % tx, "%.0f" % ty, "--ms", "1200", "--steps", "40", "--settle-ms", "1000")
+    copied = wait_for(lambda: exists(PIKY_BIN) or (SIM and exists(APP)), 30, 0.8)
+    pause(2.5)  # let Finder finish writing the bundle
+    return bool(copied)
+
+
+def translocated_pids():
+    """A PIKY that macOS started from a randomised, read-only location (App Translocation)."""
+    code, out, _ = run(["/usr/bin/pgrep", "-f", "AppTranslocation/.*/PIKY.app/Contents/MacOS/PIKY"], quiet=True)
+    return [int(line) for line in out.split() if line.isdigit()] if code == 0 else []
+
+
 def piky_pids():
     code, out, _ = run(["/usr/bin/pgrep", "-f", "^" + PIKY_BIN + "$"], quiet=True)
     return [int(line) for line in out.split() if line.isdigit()] if code == 0 else []
@@ -227,8 +275,12 @@ def library():
                 "files": [os.path.basename((entry.get("item", {}).get("fileReference") or {}).get("path", "")) for entry in entries],
                 "title": data.get("summary", {}).get("title", ""),
             }
-    _, out, _ = run(["/usr/bin/defaults", "read", BUNDLE, "currentGroup"], quiet=True)
-    current = out.strip().upper()
+    current = ""
+    for key in ("activeContext", "currentGroup"):
+        code, out, _ = run(["/usr/bin/defaults", "read", BUNDLE, key], quiet=True)
+        if code == 0 and out.strip().upper() in packs:
+            current = out.strip().upper()
+            break
     return {"packs": packs, "current": current, "currentPack": packs.get(current)}
 
 
@@ -464,7 +516,7 @@ def stage_safari_download():
     code_from, raw, _ = run(["/usr/bin/xattr", "-px", "com.apple.metadata:kMDItemWhereFroms", DOWNLOADED], quiet=True)
     if code_from == 0 and raw.strip():
         try:
-            origins = plistlib.loads(bytes.fromhex("".join(raw.split())))
+            origins = [str(origin).split("?", 1)[0] for origin in plistlib.loads(bytes.fromhex("".join(raw.split())))]
         except (ValueError, plistlib.InvalidFileException):
             origins = []
     parts = value.split(";")
@@ -522,6 +574,19 @@ def gatekeeper_follow(label, seconds):
     while time.time() < deadline:
         if piky_running():
             return True, notes
+        moved = translocated_pids()
+        if moved:
+            pause(1.5)
+            said = read_dialog(BUNDLE)
+            shot("%s-piky-from-translocated-copy" % label)
+            CTX["translocated"] = "macOS let PIKY start, from a translocated copy (pid %s); PIKY then said: “%s” [buttons: %s]" % (
+                moved, " ".join(said["texts"])[:300], ", ".join(said["buttons"]))
+            notes.append(CTX["translocated"])
+            press_button(BUNDLE, ["Quit"], "PIKY's own alert")
+            pause(1.0)
+            for pid in translocated_pids():
+                run(["/bin/kill", "-TERM", str(pid)], quiet=True)
+            return False, notes
         if answered < 2 and auth_prompt():
             notes.append("admin prompt: " + answer_auth(label))
             answered += 1
@@ -562,14 +627,17 @@ def stage_gatekeeper():
     record("The disk image mounts", PASS, "%s at %s; it holds: %s" % ("Safari opened it by itself" if by_safari else "opened from Downloads", mounted, ", ".join(contents)), evidence)
     source = os.path.join(mounted, "PIKY.app")
 
-    # Copy to Applications the way Finder does.
-    code, _, err = run(["/usr/bin/osascript", "-e", 'set theApp to POSIX file "%s" as alias' % source,
-                        "-e", 'set theFolder to POSIX file "/Applications" as alias',
-                        "-e", 'tell application "Finder" to duplicate theApp to theFolder'], timeout=90)
-    how = "Finder copied it (the drag a person makes)"
-    if code != 0 or not exists(APP):
-        how = "Finder did not copy it (%s); ditto copied it, extended attributes included" % (err.strip()[:120] or "no answer")
-        run(["/usr/bin/ditto", source, APP], timeout=120)
+    # Copy to Applications: the drag a person makes, in the image's own window.
+    how = "dragged with the pointer, in the disk image's window, from PIKY's icon onto the Applications shortcut"
+    if not drag_into_applications():
+        shot("drag-into-applications-did-not-copy")
+        code, _, err = run(["/usr/bin/osascript", "-e", 'set theApp to POSIX file "%s" as alias' % source,
+                            "-e", 'set theFolder to POSIX file "/Applications" as alias',
+                            "-e", 'tell application "Finder" to duplicate theApp to theFolder'], timeout=90)
+        how = "the pointer drag did not copy it; Finder copied it when asked by script (not a person's drag: macOS may then run it from a translocated path)"
+        if code != 0 or not exists(APP):
+            how = "neither the pointer drag nor Finder copied it (%s); ditto copied it, extended attributes included" % (err.strip()[:120] or "no answer")
+            run(["/usr/bin/ditto", source, APP], timeout=120)
     CTX["install"] = "browser download"
     app_quarantine = quarantine_of(APP)
     save_text("gatekeeper/installed-app.txt", "\n".join([
@@ -622,25 +690,18 @@ def stage_gatekeeper():
     # Open Anyway, in System Settings, by hand.
     run(["/usr/bin/open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"])
     pause(3.0)
-    button = find(SETTINGS, "--role", "AXButton", "--title", "Open Anyway", timeout=6)
-    scrolled = 0
-    while not button and scrolled < 6:
-        panes = [window for window in windows("System Settings") if window["bounds"][2] > 300]
-        if not panes:
-            break
-        box = panes[0]["bounds"]
-        qa("scroll", "-12", "--at", "%.0f,%.0f" % (box[0] + box[2] * 0.68, box[1] + box[3] * 0.6), quiet=True)
-        pause(0.7)
-        scrolled += 1
-        button = find(SETTINGS, "--role", "AXButton", "--title", "Open Anyway")
+    find(SETTINGS, "--role", "AXWindow", timeout=8)
+    shown = into_view(SETTINGS, "System Settings", "--role", "AXButton", "--title", "Open Anyway")
+    button = [shown] if shown else []
+    scrolled = "scrolled into view" if shown else "not reached by scrolling"
     evidence = [shot("privacy-security-open-anyway"), ax_dump("privacy-security", SETTINGS)]
     if not button:
         record("System Settings › Privacy & Security offers Open Anyway", INCONCLUSIVE if alert else NOTRUN,
-               "no Open Anyway button was found in Privacy & Security (scrolled %s times); see the screenshot and the outline" % scrolled, evidence)
+               "no Open Anyway button could be brought into view in Privacy & Security (%s); see the screenshot and the outline" % scrolled, evidence)
     else:
         nearby = [text for text in read_dialog(SETTINGS)["texts"] if "PIKY" in text]
         record("System Settings › Privacy & Security offers Open Anyway", PASS,
-               "the pane says: “%s” with an Open Anyway button" % (nearby[0] if nearby else "(the text beside the button could not be read)"), evidence)
+               "scrolled down to the Security section; the pane says: “%s” with an Open Anyway button at %s" % (nearby[0] if nearby else "(the text beside the button could not be read)", shown.get("frame")), evidence)
         done = click_element(SETTINGS, "--role", "AXButton", "--title", "Open Anyway")
         pause(2.0)
         evidence = [shot("after-open-anyway")] + dialogs("after-open-anyway")
@@ -654,6 +715,10 @@ def stage_gatekeeper():
         if launched:
             CTX["launched"] = True
             record("Open Anyway opens PIKY", PASS, "clicked Open Anyway (%s); then: %s. PIKY is running (pid %s)." % (done["how"] if done else "?", "; ".join(notes) or "nothing more was asked", piky_pids()), evidence)
+        elif CTX.get("translocated"):
+            record("Open Anyway opens PIKY", INFO,
+                   "Gatekeeper's override worked: clicked Open Anyway (%s); then: %s. PIKY refused to continue because macOS ran it from a translocated location, which happens when the copy in Applications was not made by a person's drag in Finder. How it was copied here: %s."
+                   % (done["how"] if done else "?", "; ".join(notes), how), evidence)
         else:
             record("Open Anyway opens PIKY", LIMIT,
                    "Open Anyway was clicked (%s) but PIKY did not start within the time allowed. What happened: %s. Either macOS ignores a scripted click or scripted typing on this protected step, or its prompt could not be reached by the driver; a person at the screen is needed."
@@ -672,7 +737,7 @@ def stage_gatekeeper_context_open():
         gatekeeper_dismiss(alert)
     run(["/usr/bin/open", "-R", APP])
     pause(2.5)
-    items = [item for item in find("com.apple.finder", "--title", "PIKY.app", all=True) if usable(item.get("frame"))]
+    items = [item for item in find("com.apple.finder", "--role", "AXImage", "--title", "PIKY", all=True) if usable(item.get("frame")) and item["frame"][3] >= 14]
     evidence = [shot("finder-reveals-piky")]
     if not items:
         record("Control-click › Open (macOS 14)", INCONCLUSIVE, "PIKY's icon could not be located in the Finder window", evidence + [ax_dump("finder-applications", "com.apple.finder", maximum=2500)])
@@ -752,10 +817,11 @@ def permission_check():
 
 
 def label_area(frame):
-    """The middle of a button: its label on its fill, clear of the rounded corners."""
+    """A button's label with a margin of the fill around it, inside the button's rounded corners."""
     if not usable(frame):
         return frame
-    return [frame[0] + frame[2] * 0.14, frame[1] + frame[3] * 0.22, frame[2] * 0.72, frame[3] * 0.56]
+    # Accessibility gives the label's own box; the fill reaches a little past it on every side.
+    return [frame[0] - 5, frame[1] - 4, frame[2] + 10, frame[3] + 8]
 
 
 def stage_first_run():
@@ -786,25 +852,31 @@ def stage_first_run():
     # The Continue label, with PIKY's window active and then inactive.
     button = find(BUNDLE, "--role", "AXButton", "--title", "Continue")
     frame = button[0].get("frame") if button else None
-    measured = {"active": contrast(active, label_area(frame))}
-    crops = [crop(active, frame, "continue-active")]
-    qa("click", "40", "%.0f" % (qa("probe", quiet=True).get("mainDisplayPoints", [0, 800])[1] * 0.45))  # the desktop: Finder comes forward, no window opens
-    pause(1.5)
+    measured = {"active": contrast(active, label_area(frame), inset=0)}
+    crops = [crop(active, frame, "continue-active", margin=12)]
+    # Another application comes forward, in a small window beside PIKY's: PIKY's
+    # window is then inactive and still uncovered. (A click on the wallpaper
+    # would not do: on macOS 14 and later that slides every window away.)
+    open_text_document(rect="20,90,560,420")
+    pause(1.2)
     inactive = shot("first-run-window-inactive")
     behind = frontmost()
     still = find(BUNDLE, "--role", "AXButton", "--title", "Continue")
-    measured["inactive"] = contrast(inactive, label_area(still[0].get("frame") if still else frame))
-    crops.append(crop(inactive, still[0].get("frame") if still else frame, "continue-inactive"))
+    there = bool(still) and usable(still[0].get("frame")) and bool(find(BUNDLE, "--role", "AXWindow", "--title", "Meet PIKY"))
+    measured["inactive"] = contrast(inactive, label_area(still[0].get("frame")), inset=0) if there else {}
+    crops.append(crop(inactive, still[0].get("frame"), "continue-inactive", margin=12) if there else None)
     CTX["continue_contrast"] = measured
-    if frame and measured["active"].get("ok") and measured["inactive"].get("ok"):
-        low = measured["inactive"].get("contrastRatio", 0) < 3.0
-        record("Continue label, window active and inactive", FAIL if low and behind.get("bundle") != BUNDLE else PASS if not low else INCONCLUSIVE,
-               "label against button fill, WCAG contrast: active %.2f:1 (fill #%s, label #%s); inactive %.2f:1 (fill #%s, label #%s), frontmost then: %s. Below 3:1 a label is hard to read."
-               % (measured["active"]["contrastRatio"], measured["active"]["fillColor"], measured["active"]["markColor"],
-                  measured["inactive"]["contrastRatio"], measured["inactive"]["fillColor"], measured["inactive"]["markColor"], behind.get("name")),
+    valid = there and behind.get("bundle") not in (BUNDLE, None, "") and measured["active"].get("ok") and measured["inactive"].get("ok")
+    if valid:
+        low = min(measured["active"].get("contrastRatio", 0), measured["inactive"].get("contrastRatio", 0)) < 3.0
+        record("Continue label, window active and inactive", FAIL if low else PASS,
+               "label against button fill, WCAG contrast: active (PIKY in front) %.2f:1 (fill #%s, label #%s); inactive (%s in front) %.2f:1 (fill #%s, label #%s). Below 3:1 a label is hard to read."
+               % (measured["active"]["contrastRatio"], measured["active"]["fillColor"], measured["active"]["markColor"], behind.get("name"),
+                  measured["inactive"]["contrastRatio"], measured["inactive"]["fillColor"], measured["inactive"]["markColor"]),
                [active, inactive] + crops, data=measured)
     else:
-        record("Continue label, window active and inactive", INCONCLUSIVE, "the Continue button could not be located or measured", [active, inactive, outline])
+        record("Continue label, window active and inactive", INCONCLUSIVE,
+               "the Continue button could not be measured in both states (button found: %s; frontmost for the inactive shot: %s)" % (there, behind.get("name")), [active, inactive, outline])
 
     # The mark in the menu bar.
     status = piky_status()
@@ -867,8 +939,9 @@ def stage_permissions():
                "System Settings did not show a switch for PIKY that the driver could find; see the screenshot and the outline", evidence)
     else:
         value_before = toggle[0].get("value")
-        if usable(toggle[0].get("frame")):
-            x, y = center(toggle[0]["frame"])
+        visible = into_view(SETTINGS, "System Settings", "--role", toggle[0].get("role", "AXCheckBox"), "--near", "PIKY") or toggle[0]
+        if usable(visible.get("frame")):
+            x, y = center(visible["frame"])
             qa("click", "%.1f" % x, "%.1f" % y)
         pause(2.0)
         evidence.append(shot("after-clicking-accessibility-switch"))
@@ -929,14 +1002,14 @@ def stage_hotkey_without_permission():
         escape()
 
 
-def open_text_document():
+def open_text_document(rect="60,70,860,520"):
     if not os.path.exists(TEXT_FILE):
         with open(TEXT_FILE, "w", encoding="utf-8") as handle:
             handle.write("\n\n".join(PARAGRAPHS) + "\n")
     run(["/usr/bin/open", "-a", "TextEdit", TEXT_FILE], quiet=True)
     find("com.apple.TextEdit", "--role", "AXTextArea", timeout=12)
     pause(1.0)
-    qa("ax", "set-frame", "--bundle", "com.apple.TextEdit", "--rect", "60,70,860,520", quiet=True)
+    qa("ax", "set-frame", "--bundle", "com.apple.TextEdit", "--rect", rect, quiet=True)
     pause(0.6)
     activate("com.apple.TextEdit")
 
@@ -1197,6 +1270,7 @@ def stage_finder_pick():
                          detail="one pointer click on the file in Finder (%s at %s; Finder reports it selected: %s); Finder stayed in front: %s;"
                          % (item.get("role"), item["frame"], selected, front.get("bundle") == "com.apple.finder"))
         if ok:
+            CTX.setdefault("finder_picked", []).append(name)
             pack = current_pack()
             if pack and pack["files"] and not same_name(pack["files"][-1], name):
                 record(label + " (the file PIKY kept)", FAIL, "the newest Pick refers to “%s”, not “%s”" % (pack["files"][-1], name))
@@ -1436,7 +1510,7 @@ def stage_command_return():
     # Fixture files are recognised by their bytes, whatever name they arrive under.
     by_digest = dict((digest, name) for name, digest in manifest.items())
     delivered_fixture = [by_digest[item.get("sha256")] for item in files if item.get("sha256") in by_digest]
-    expected_fixture = [unicodedata.normalize("NFC", name) for name in expected_files if unicodedata.normalize("NFC", name) in manifest]
+    expected_fixture = [unicodedata.normalize("NFC", name) for name in (expected_files or CTX.get("finder_picked", [])) if unicodedata.normalize("NFC", name) in manifest]
     order_ok = bool(expected_fixture) and delivered_fixture == expected_fixture
     intact = bool(expected_fixture) and sorted(delivered_fixture) == sorted(expected_fixture)
     text_in_note = None
@@ -1450,7 +1524,8 @@ def stage_command_return():
         except (OSError, ValueError):
             text_in_note = None
     pictures = receipt.get("imageCount", 0)
-    wanted_pictures = len([1 for kind, name in zip(before_pack["kinds"], before_pack["files"]) if kind in ("screen_region", "image") or name.lower().endswith(".png")]) if before_pack else 0
+    wanted_pictures = len([1 for kind, name in zip(before_pack["kinds"], before_pack["files"]) if kind in ("screen_region", "image") or name.lower().endswith(".png")]) if before_pack else \
+        len([label for label in CTX["picks"] if label.startswith("Camera")]) + len([name for name in CTX.get("finder_picked", []) if name.lower().endswith(".png")])
     press_ms = pressed.get("pressedAtUtcMs")
     try:
         import datetime
@@ -1526,6 +1601,12 @@ def stage_library_restart():
     # --- Undo by ↶ in the menu bar.
     now = after_keys if after_keys is not None else start
     arrow = click_element(BUNDLE, "--role", "AXButton", "--title", "Undo last Pick")
+    if not arrow:
+        item = piky_status()
+        if item and usable(item.get("frame")) and item["frame"][2] >= 44:
+            frame = item["frame"]
+            qa("click", "%.1f" % (frame[0] + frame[2] - 10), "%.1f" % (frame[1] + frame[3] / 2))
+            arrow = {"how": "pointer click on ↶ at the right end of PIKY's menu-bar item, %s wide" % int(frame[2])}
     by_arrow = wait_count(now - 1, 6) if arrow else None
     after_arrow = count_now()
     record("Undo last Pick with ↶ in the menu bar", PASS if by_arrow else INCONCLUSIVE if not arrow else FAIL,
@@ -1564,7 +1645,7 @@ def stage_library_restart():
     again = current_pack(expect=kept, timeout=5)
     same = bool(again and before_new and again["ids"] == before_new["ids"])
     listing.append(shot("after-opening-saved-pack"))
-    record("Library lists the saved Pack and opens it", PASS if restored and same else INCONCLUSIVE if not opened else FAIL,
+    record("Library lists the saved Pack and opens it", PASS if restored and same else INCONCLUSIVE if not opened or not (again and before_new) else FAIL,
            "PIKY's menu › Library… (%s); Open %s; the item reads “%s”; the Picks on disk are %s as before New Pack"
            % (how, "clicked (%s)" % opened["how"] if opened else "was not found", (piky_status() or {}).get("label"), "the same, in the same order," if same else "NOT the same"),
            listing + ([] if opened else [ax_dump("library", BUNDLE)]))
@@ -1594,7 +1675,9 @@ def stage_library_restart():
            "reopened (%s); PIKY's windows: %s; processes: %s" % ("LaunchServices" if CTX["own_accessibility"] else "started by the job, as before", piky_windows(), piky_pids()), [shot("after-reopen")])
     same_current = bool(before_quit["currentPack"] and after["currentPack"] and before_quit["currentPack"]["ids"] == after["currentPack"]["ids"])
     same_library = sorted(before_quit["packs"]) == sorted(after["packs"])
-    record("The Pack and the Library survive a restart", PASS if status and status["count"] == count_before and same_current and same_library else FAIL,
+    readable = bool(before_quit["currentPack"] and after["currentPack"])
+    record("The Pack and the Library survive a restart", PASS if status and status["count"] == count_before and same_current and same_library
+           else INCONCLUSIVE if status and status["count"] == count_before and same_library and not readable else FAIL,
            "before quitting: “%s Picks”, %s Pack(s) on disk; after reopening: “%s”, %s Pack(s) on disk; the current Pack's Picks are %s"
            % (count_before, len(before_quit["packs"]), status["label"] if status else "no status item", len(after["packs"]), "the same, in the same order" if same_current else "NOT the same"))
 
@@ -1624,6 +1707,10 @@ def stage_collect():
         code, out, _ = run(["/usr/bin/log", "show", "--start", started, "--style", "compact", "--predicate", predicate], timeout=240, quiet=True)
         text = "\n".join(out.splitlines()[-6000:])
         save_text("logs/" + name, text)
+        if name == "system.log" and "AppTranslocation" in text:
+            record("App Translocation", INFO,
+                   "the system log shows macOS preparing to run the quarantined copy from a randomised, read-only location (…/AppTranslocation/…/PIKY.app), which it does when a quarantined app was not put in place by a person's drag in Finder. How the copy was made here: see the Gatekeeper stage.",
+                   ["logs/system.log"])
     record("PIKY processes at the end", INFO, "%s running (pid %s)" % (len(pids), pids))
     # Leave the machine as tidy as is practical; GitHub destroys it anyway.
     for pid in piky_pids():

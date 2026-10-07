@@ -13,7 +13,7 @@ import Foundation
 //   qa type <text> | qa type --stdin
 //   qa move <x> <y> [--mods …] [--steps N] [--ms N]
 //   qa click <x> <y> [--mods …] [--count N] [--button right]
-//   qa drag <x1> <y1> <x2> <y2> [--mods …] [--steps N] [--ms N]
+//   qa drag <x1> <y1> <x2> <y2> [--mods …] [--steps N] [--ms N] [--settle-ms N]
 //   qa scroll <lines> [--mods …] [--at x,y]
 //   qa ax tree|find|press|action <name>|focused|set-frame|text-range|selection|value  (see below)
 //   qa image info|contrast|color|diff|crop …
@@ -132,7 +132,7 @@ case "drag":
     let flags = Events.flags(arguments.string("mods"))
     Events.move(to: start, flags: flags, steps: 8, totalMs: 160)
     milliseconds(150)
-    Events.drag(from: start, to: end, flags: flags, steps: arguments.int("steps", 24), totalMs: arguments.int("ms", 600))
+    Events.drag(from: start, to: end, flags: flags, steps: arguments.int("steps", 24), totalMs: arguments.int("ms", 600), settleMs: arguments.int("settle-ms", 120))
     emit(["ok": true, "from": [Double(start.x), Double(start.y)], "to": [Double(end.x), Double(end.y)], "at": isoNow()])
 
 case "scroll":

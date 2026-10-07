@@ -92,11 +92,17 @@ enum Events {
             if index < count { milliseconds(90) }
         }
     }
-    static func drag(from start: CGPoint, to end: CGPoint, flags: CGEventFlags, steps: Int, totalMs: Int) {
+    /// `settleMs`: how long the pointer rests over the target before letting
+    /// go (Finder highlights a drop target only after a moment).
+    static func drag(from start: CGPoint, to end: CGPoint, flags: CGEventFlags, steps: Int, totalMs: Int, settleMs: Int = 120) {
         mouse(.leftMouseDown, at: start, flags: flags)
         milliseconds(120)
         move(to: end, from: start, flags: flags, steps: steps, totalMs: totalMs, type: .leftMouseDragged)
-        milliseconds(120)
+        milliseconds(settleMs / 2)
+        mouse(.leftMouseDragged, at: CGPoint(x: end.x + 1, y: end.y + 1), flags: flags)
+        milliseconds(settleMs / 2)
+        mouse(.leftMouseDragged, at: end, flags: flags)
+        milliseconds(60)
         mouse(.leftMouseUp, at: end, flags: flags)
     }
     /// One wheel notch per event (line units, no phases): a mouse wheel.
