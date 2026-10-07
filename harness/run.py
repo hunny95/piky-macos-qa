@@ -381,9 +381,21 @@ def press_button(app, titles, label):
 # ------------------------------------------------- the admin prompt, by the UI
 
 def auth_prompt():
-    """Is a password box waiting for keys? macOS turns on secure input for one."""
+    """Is a password box waiting for keys? Yes when the element that has the
+    keyboard is a secure text field, or when secure input is on: macOS turns
+    that on exactly while a password box has the keyboard, including in its
+    own authentication window, which does not describe itself to
+    Accessibility."""
     focused = qa("ax", "focused", quiet=True)
     return bool(focused.get("secure")) or bool(focused.get("secureInput"))
+
+
+def typed_in_the_open(password):
+    """After typing: did any of it land in a field that shows its text? Looks
+    at the field that has the keyboard, without logging what it holds."""
+    focused = qa("ax", "focused", quiet=True)
+    value = (focused.get("element") or {}).get("value") or ""
+    return bool(focused.get("found")) and not focused.get("secure") and any(password[i:i + 5] in value for i in range(0, len(password) - 4))
 
 
 def account_password():
@@ -418,6 +430,15 @@ def answer_auth(label):
         return "prompt gone"
     qa("type", "--stdin", input_text=password, quiet=True, secret=True)
     pause(0.4)
+    if typed_in_the_open(password):
+        # The prompt went away under the keys. Clear the field before anything looks at the screen.
+        press(0, "cmd")
+        press(51)
+        pause(0.3)
+        CTX["password_cleared"] = True
+        record("macOS asked for the administrator's password (%s)" % label, INCONCLUSIVE,
+               "the prompt closed while it was being answered; what had been typed into another field was selected and deleted before any screenshot or outline was taken", evidence)
+        return "prompt closed while typing"
     press(36)
     pause(3.0)
     still = auth_prompt()
@@ -1185,14 +1206,18 @@ def expect_pick(label, kind, evidence, check_text=None, detail="", verified=Fals
     grew = wait_count(target, 9)
     status = piky_status()
     seen = status["count"] if status else None
-    pack = current_pack(expect=target if grew else None, timeout=7)
+    read = current_pack(expect=target if grew else None, timeout=7)
+    # PIKY saves a moment after a Pick: a Pack on disk that has not caught up says nothing yet.
+    pack = read if read and read["count"] == target else None
     kinds = pack["kinds"] if pack else []
     stored = pack["texts"][-1].strip() if pack and pack["texts"] and check_text else None
     ok = bool(grew) and (not kinds or kinds[-1] in kind)
     if check_text is not None and stored is not None:
         ok = ok and stored == check_text
-    facts = "%s the menu-bar item reads “%s” (expected %s Pick%s); the Pack on disk holds %s: %s" % (
-        detail, status["label"] if status else "nothing", target, "" if target == 1 else "s", pack["count"] if pack else "?", ", ".join(kinds) or "-")
+    facts = "%s the menu-bar item reads “%s” (expected %s Pick%s); the Pack on disk %s" % (
+        detail, status["label"] if status else "nothing", target, "" if target == 1 else "s",
+        ("holds %s: %s" % (pack["count"], ", ".join(kinds))) if pack else
+        ("held %s when read (not yet %s), so it was not judged" % (read["count"], target)) if read else "could not be read")
     if check_text is not None:
         facts += "; the newest Pick's text %s the paragraph" % ("is exactly" if stored == check_text else "is NOT" if stored is not None else "could not be compared with")
     if ok:
@@ -1344,6 +1369,27 @@ def describe_box(box, geometry, origin):
     return "%s×%s at %s,%s (closest page element: %s, %s pt off in total)" % (int(box[2]), int(box[3]), int(box[0]), int(box[1]), best[0], int(best[1]))
 
 
+def camera_needs_screen_recording(evidence):
+    """PIKY answered the Camera by opening its Settings: it has no Screen
+    Recording. Closes the window (left open it suspends picking) and records
+    what that means under the permissions PIKY is running with."""
+    if "PIKY Settings" not in piky_windows():
+        return False
+    qa("mod", "up", "opt", quiet=True)
+    release_modifiers()
+    evidence = evidence + [shot("camera-piky-asks-for-screen-recording")]
+    focus_piky_window("PIKY Settings")
+    press_button(BUNDLE, ["Done"], "PIKY Settings")
+    pause(0.8)
+    if CTX["own_accessibility"]:
+        record("Camera under PIKY's own permissions", INCONCLUSIVE,
+               "PIKY said the Camera needs Screen Recording and opened its Settings, as it should without that permission. This harness grants PIKY Accessibility through System Settings but does not attempt the second grant "
+               "(Screen Recording, after which PIKY restarts once), so the Camera was not exercised in this run. That is a gap of the harness, not a limit of the runner and not a PIKY failure.", evidence)
+    else:
+        record("Camera", LIMIT, "PIKY opened its Settings instead of the Camera: it has no Screen Recording here (%s)" % CTX["mode"], evidence)
+    return True
+
+
 def stage_camera():
     STATE["stage"] = "10 Camera"
     with open(os.path.join(ROOT, "TestPage", "geometry.json"), encoding="utf-8") as handle:
@@ -1387,10 +1433,7 @@ def stage_camera():
         pause(1.5)
         hover = shot("camera-option-held-over-bar-chart")
         outline = outline_box(hover, card, baseline, margin=60)
-        settings_up = "PIKY Settings" in piky_windows()
-        if settings_up:
-            record("Camera mode: ⌥ held over the bar chart", LIMIT,
-                   "PIKY opened its Settings instead of the Camera: the Camera needs Screen Recording, which PIKY does not have here (%s)" % CTX["mode"], [hover])
+        if camera_needs_screen_recording([hover]):
             raise Blocked()
         seen = outline["added"] > 200
         record("Camera mode: ⌥ held over the bar chart", PASS if seen else INCONCLUSIVE,
@@ -1399,7 +1442,9 @@ def stage_camera():
                [baseline, hover, crop(hover, card, "camera-outline-bar-chart", margin=30)], data={"outline": outline, "optionDownAt": held.get("at")})
         # --- Click commit.
         qa("click", "%.0f" % cx, "%.0f" % cy, "--mods", "opt")
-        pause(0.4)
+        pause(1.2)
+        if camera_needs_screen_recording([hover]):
+            raise Blocked()
         expect_pick("Camera: ⌥-click takes what is outlined", ("screen_region", "image"), [shot("camera-after-click")], verified=seen,
                     detail="one ⌥-click on the bar chart (outline before the click: %s);" % describe_box(outline["box"], geometry, origin))
 
@@ -1707,6 +1752,30 @@ def stage_library_restart():
            % (count_before, len(before_quit["packs"]), status["label"] if status else "no status item", len(after["packs"]), "the same, in the same order" if same_current else "NOT the same"))
 
 
+def scrub_evidence():
+    """The last lock: no file of the evidence may hold the one-run password.
+    A text file that does is removed and the fact (never the password) recorded."""
+    password = CTX.get("password")
+    if not password:
+        return
+    removed = []
+    for folder, _, names in os.walk(OUT):
+        for name in names:
+            target = os.path.join(folder, name)
+            if name.endswith(".png"):
+                continue
+            try:
+                with open(target, "rb") as handle:
+                    found = password.encode("utf-8") in handle.read()
+            except OSError:
+                continue
+            if found:
+                os.remove(target)
+                removed.append(os.path.relpath(target, OUT))
+    record("The one-run password is in no evidence file", PASS if not removed else FAIL,
+           "every text file of the evidence was searched for it; %s" % ("none held it" if not removed else "removed: %s" % ", ".join(removed)))
+
+
 def stage_collect():
     STATE["stage"] = "13 Evidence"
     if CTX.get("foreign"):
@@ -1798,6 +1867,10 @@ def main():
     finally:
         try:
             stage_collect()
+        except Exception:  # noqa: BLE001
+            log(traceback.format_exc())
+        try:
+            scrub_evidence()  # whatever else happened, the password is in no file that leaves the machine
         except Exception:  # noqa: BLE001
             log(traceback.format_exc())
         results_writer.write(RESULTS, CTX, RELEASE, STATE)
