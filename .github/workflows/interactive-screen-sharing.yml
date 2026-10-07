@@ -1,0 +1,155 @@
+# FALLBACK, prepared and not yet run: a person tests PIKY by hand on a
+# temporary GitHub-hosted Mac through macOS's own Screen Sharing, reachable
+# only inside the owner's private Tailscale network.
+#
+# It needs three repository secrets: QA_SESSION_PASSPHRASE (already there),
+# TS_OAUTH_CLIENT_ID and TS_OAUTH_SECRET. See docs/INTERACTIVE-SCREEN-SHARING.md.
+#
+# No port is opened to the internet, no tunnel service is used, no VNC
+# password is set. The Mac joins the tailnet as an ephemeral node that is
+# removed when the job ends. Nothing readable about the session is published.
+#
+# NOT KNOWN until one session is run: whether Screen Sharing started this way
+# lets a person control the Mac, or only watch it.
+name: Interactive macOS QA (Screen Sharing fallback)
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos_version:
+        description: 'macOS (one session at a time)'
+        type: choice
+        options: ['14', '15', '26']
+        default: '26'
+      session_minutes:
+        description: 'How long the Mac stays up, in minutes (5 to 120)'
+        type: string
+        default: '60'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: interactive-macos-qa
+  cancel-in-progress: false
+
+jobs:
+  session:
+    name: Interactive QA over Screen Sharing on macOS ${{ inputs.macos_version }}
+    if: github.actor == github.repository_owner
+    runs-on: macos-${{ inputs.macos_version }}
+    timeout-minutes: 175
+    env:
+      NO_COLOR: '1'
+      QA_REMOTE: screen-sharing
+      QA_RUNNER_LABEL: macos-${{ inputs.macos_version }}
+      QA_SESSION_MINUTES: ${{ inputs.session_minutes }}
+      QA_TOOLS: ${{ github.workspace }}/build
+    steps:
+      - name: The session can be opened safely (it stops here if not)
+        env:
+          QA_SESSION_PASSPHRASE: ${{ secrets.QA_SESSION_PASSPHRASE }}
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          MISSING=''
+          for NAME in QA_SESSION_PASSPHRASE TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET; do
+            [ -n "${!NAME:-}" ] || MISSING="$MISSING $NAME"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Not set as repository secrets:$MISSING. See docs/INTERACTIVE-SCREEN-SHARING.md. Nothing was started."
+            exit 1
+          fi
+          if [ "${#QA_SESSION_PASSPHRASE}" -lt 20 ]; then
+            echo "::error::QA_SESSION_PASSPHRASE must be at least 20 characters. Nothing was started."; exit 1
+          fi
+          case "$QA_SESSION_MINUTES" in ''|*[!0-9]*) echo "::error::session_minutes must be a whole number."; exit 1 ;; esac
+          if [ "$QA_SESSION_MINUTES" -lt 5 ] || [ "$QA_SESSION_MINUTES" -gt 120 ]; then
+            echo "::error::session_minutes must be between 5 and 120."; exit 1
+          fi
+          sw_vers; uname -m
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "$(uname -m)" != arm64 ]; then
+            echo "::error::This workflow runs on standard GitHub-hosted Apple silicon runners only."; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the QA tools here and lay out the kit (PIKY itself is not installed)
+        run: |
+          /usr/bin/python3 TestFiles/generate.py --check
+          /usr/bin/python3 TestPage/build.py --check
+          NEWEST="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | grep -viE 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -n "$NEWEST" ]; then sudo -n xcode-select -s "$NEWEST/Contents/Developer" || true; fi
+          bash harness/build-tools.sh "$QA_TOOLS"
+          bash interactive/session.sh kit
+
+      - name: A random password for this session's temporary administrator (masked at once)
+        run: bash interactive/session.sh credentials
+
+      - name: A temporary administrator, to sign in with and to answer macOS's password prompts
+        run: bash interactive/session.sh admin-create
+
+      # Tailscale's own action, pinned to a commit. With an OAuth client it
+      # joins as a pre-approved EPHEMERAL node carrying the tag below, masks
+      # the secret, and logs the node out in its post step.
+      - name: Join the owner's tailnet as an ephemeral node
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:piky-qa
+          hostname: piky-qa-macos-${{ inputs.macos_version }}
+          log-mode: quiet
+
+      - name: macOS Screen Sharing on, for this job only
+        run: bash interactive/session.sh screen-sharing-on
+
+      - name: Encrypt the session's details for the repository owner
+        env:
+          QA_SESSION_PASSPHRASE: ${{ secrets.QA_SESSION_PASSPHRASE }}
+        run: bash interactive/session.sh session-note
+
+      - name: Upload the encrypted session note (ciphertext only)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: piky-interactive-session-${{ github.run_id }}
+          path: session-artifact/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: The session is open
+        run: |
+          {
+            echo "## The Mac is ready: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)), Screen Sharing over the tailnet"
+            echo
+            echo "Open for $QA_SESSION_MINUTES minutes. Its tailnet address and the temporary administrator's password are in the artifact"
+            echo "\`piky-interactive-session-$GITHUB_RUN_ID\`, encrypted with QA_SESSION_PASSPHRASE. Nothing readable is published."
+          } >> "$GITHUB_STEP_SUMMARY"
+          bash interactive/session.sh keep-alive
+
+      - name: Collect privacy-safe evidence
+        if: always()
+        run: bash interactive/session.sh collect
+
+      - name: Nothing secret in the evidence
+        if: always()
+        run: bash harness/check-evidence.sh "$GITHUB_WORKSPACE/evidence"
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: piky-interactive-qa-screen-sharing-macos-${{ inputs.macos_version }}-run${{ github.run_number }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Screen Sharing off, temporary administrator and every credential deleted
+        if: always()
+        run: bash interactive/session.sh teardown

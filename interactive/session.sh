@@ -9,6 +9,8 @@
 #   admin-create      a temporary administrator, for macOS's own password prompts
 #   rustdesk-install  RustDesk, one pinned release, checked against its SHA-256
 #   rustdesk-start    start it, give it the session password, read its ID
+#   screen-sharing-on   (fallback) macOS's own Screen Sharing, reachable over the owner's tailnet only
+#   screen-sharing-off  (fallback) switch it off again
 #   session-note      the session's details, encrypted for the repository owner
 #   keep-alive        wait until the time is up or the person ends the session
 #   collect           privacy-safe evidence into ./evidence
@@ -23,7 +25,9 @@ QA_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 QA_STEP="${1:?Usage: session.sh <step>}"
 QA_ADMIN=pikyqa
 QA_KIT="$HOME/Desktop/PIKY-QA"
+QA_SHARED_KIT=/Users/Shared/PIKY-QA
 QA_END_FILE="$QA_KIT/END SESSION - delete this file.txt"
+if [ "${QA_REMOTE:-rustdesk}" = screen-sharing ]; then QA_END_FILE="$QA_SHARED_KIT/END SESSION - delete this file.txt"; fi
 QA_STATE="${RUNNER_TEMP:?RUNNER_TEMP is not set}/piky-interactive"
 QA_CREDENTIALS="$QA_STATE/credentials"
 QA_EVIDENCE="${GITHUB_WORKSPACE:-$QA_ROOT}/evidence"
@@ -54,10 +58,18 @@ load_credentials() {
   RUSTDESK_ID="$(sed -n 's/^RUSTDESK_ID=//p' "$QA_CREDENTIALS")"
 }
 
-# Four groups of five, from letters and digits that cannot be mistaken for one
-# another: about 99 bits, and possible to type into a password box by hand.
+# The remote-desktop password: four groups of five (about 99 bits). It is
+# pasted into the RustDesk client on the owner's own Mac, never typed remotely.
 new_password() {
   /usr/bin/python3 -c 'import secrets; a = "abcdefghjkmnpqrstuvwxyz23456789"; print("-".join("".join(secrets.choice(a) for _ in range(5)) for _ in range(4)))'
+}
+
+# The temporary administrator's password is typed by hand, over a remote
+# desktop, into macOS's own password box: 12 lowercase letters and digits, no
+# symbol, no hyphen, none that can be mistaken for another (about 59 bits).
+# It exists for one session, on a Mac only the session's holder can reach.
+new_admin_password() {
+  /usr/bin/python3 -c 'import secrets; a = "abcdefghjkmnpqrstuvwxyz23456789"; print("".join(secrets.choice(a) for _ in range(12)))'
 }
 
 # with_limit <seconds> <command…>: the command's own status, or 137 if it had to be stopped.
@@ -93,17 +105,25 @@ kit)
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>URL</key><string>$PIKY_DMG_URL</string></dict></plist>
 WEBLOC
-  printf 'Delete this file (move it to the Trash) when you are done.\nThe session then ends, the evidence is collected and GitHub destroys this Mac.\n' > "$QA_END_FILE"
+  printf 'Delete this file (move it to the Trash) when you are done.\nThe session then ends, the evidence is collected and GitHub destroys this Mac.\n' > "$QA_KIT/END SESSION - delete this file.txt"
   # Screenshots taken on this Mac (Shift-Command-3 or 4) land in Results.
   defaults write com.apple.screencapture location "$QA_KIT/Results"
   killall SystemUIServer >/dev/null 2>&1 || true
   say "The QA kit is on the Desktop: $(find "$QA_KIT" -maxdepth 1 -mindepth 1 | wc -l | tr -d ' ') items. PIKY itself is not installed."
+  if [ "${QA_REMOTE:-rustdesk}" = screen-sharing ]; then
+    # Over Screen Sharing the tester signs in as the temporary administrator,
+    # with a desktop of their own: the kit must be somewhere that user can read.
+    sudo -n ditto "$QA_KIT" "$QA_SHARED_KIT"
+    # That user must be able to save into Results and to delete the END SESSION file.
+    sudo -n chmod -R a+rwX "$QA_SHARED_KIT"
+    say "A copy of the kit is in $QA_SHARED_KIT for the temporary administrator's own desktop."
+  fi
   ;;
 
 credentials)
   mkdir -p "$QA_STATE"
   chmod 700 "$QA_STATE"
-  ADMIN_PASSWORD="$(new_password)"
+  ADMIN_PASSWORD="$(new_admin_password)"
   echo "::add-mask::$ADMIN_PASSWORD"
   RUSTDESK_PASSWORD="$(new_password)"
   echo "::add-mask::$RUSTDESK_PASSWORD"
@@ -195,12 +215,60 @@ rustdesk-start)
   sudo -n "$RUSTDESK_BIN" --option verification-method use-permanent-password >/dev/null 2>&1 || true
   sudo -n "$RUSTDESK_BIN" --option approve-mode password >/dev/null 2>&1 || true
   ( umask 077; printf 'RUSTDESK_ID=%s\n' "$RUSTDESK_ID" >> "$QA_CREDENTIALS" )
-  pgrep -x RustDesk >/dev/null 2>&1 || fail "RustDesk stopped after it was configured."
-  say "RustDesk is running, has an ID (masked) and accepts only the session password."
+  # Less for the far side to send: no wallpaper while someone is connected.
+  # (Image quality, sound and keyboard mode are chosen on the controlling
+  # side; the session note says which.)
+  sudo -n "$RUSTDESK_BIN" --option allow-remove-wallpaper Y >/dev/null 2>&1 || true
+  # It must stand for a full minute, as the same process with the same ID,
+  # before anyone is told it is ready. (On Tahoe it stopped once mid-session.)
+  QA_FIRST_PID="$(pgrep -x RustDesk | head -1)"
+  QA_CHECKS=0
+  while [ "$QA_CHECKS" -lt 12 ]; do
+    sleep 5
+    QA_CHECKS=$((QA_CHECKS + 1))
+    [ "$(pgrep -x RustDesk | head -1)" = "$QA_FIRST_PID" ] || fail "RUSTDESK INTERACTIVE PATH UNRELIABLE: RustDesk stopped or restarted within $((QA_CHECKS * 5)) seconds of starting on macOS $(sw_vers -productVersion). The session is not opened."
+    QA_AGAIN="$("$RUSTDESK_BIN" --get-id 2>/dev/null | tr -dc '0-9' || true)"
+    [ "$QA_AGAIN" = "$RUSTDESK_ID" ] || fail "RUSTDESK INTERACTIVE PATH UNRELIABLE: RustDesk no longer reports its ID $((QA_CHECKS * 5)) seconds after starting on macOS $(sw_vers -productVersion). The session is not opened."
+  done
+  say "RustDesk is running, has an ID (masked), accepts the session password, and stood for 60 seconds as one process."
   # What a job-started program may do on this runner: the same answer RustDesk gets.
   if [ -x "$QA_TOOLS/qa" ]; then
     "$QA_TOOLS/qa" probe | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); print("A program started by this job may: read other apps (Accessibility) %s, post keyboard and pointer input %s, capture the screen %s." % (d.get("accessibilityTrusted"), d.get("postEvents"), d.get("screenCapture")))' || true
   fi
+  ;;
+
+screen-sharing-on)
+  runner_only
+  # Apple's own service, started the only way a script can. Whether a session
+  # opened this way may control the Mac or only watch it is not known until
+  # someone connects: since macOS 12.1 Apple reserves control for Screen
+  # Sharing that was switched on in System Settings.
+  sudo -n launchctl enable system/com.apple.screensharing
+  sudo -n launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+  sleep 4
+  QA_GREETING="$(/usr/bin/python3 -c 'import socket
+try:
+    link = socket.create_connection(("127.0.0.1", 5900), timeout=5); link.settimeout(5); print(link.recv(12).decode("ascii", "replace").strip())
+except OSError as problem:
+    print("no answer: %s" % problem)')"
+  case "$QA_GREETING" in
+    RFB*) say "Screen Sharing is on and answers ($QA_GREETING)." ;;
+    *) fail "Screen Sharing did not start ($QA_GREETING). The session is not opened." ;;
+  esac
+  # Where it can be reached: this node's address inside the owner's tailnet, nowhere else.
+  QA_TAILNET_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+  QA_TAILNET_NAME="$(tailscale status --self --json 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print((json.load(sys.stdin).get("Self") or {}).get("DNSName", "").rstrip("."))' 2>/dev/null || true)"
+  [ -n "$QA_TAILNET_IP" ] || fail "This Mac has no tailnet address, so nobody could reach it. The session is not opened."
+  echo "::add-mask::$QA_TAILNET_IP"
+  [ -z "$QA_TAILNET_NAME" ] || echo "::add-mask::$QA_TAILNET_NAME"
+  ( umask 077; printf 'TAILNET_IP=%s\nTAILNET_NAME=%s\n' "$QA_TAILNET_IP" "$QA_TAILNET_NAME" >> "$QA_CREDENTIALS" )
+  ;;
+
+screen-sharing-off)
+  runner_only
+  sudo -n launchctl bootout system/com.apple.screensharing >/dev/null 2>&1 || true
+  sudo -n launchctl disable system/com.apple.screensharing >/dev/null 2>&1 || true
+  say "Screen Sharing is off."
   ;;
 
 session-note)
@@ -209,6 +277,30 @@ session-note)
   QA_OUT="${GITHUB_WORKSPACE:?}/session-artifact"
   mkdir -p "$QA_OUT"
   QA_PLAIN="$QA_STATE/session.txt"
+  if [ "${QA_REMOTE:-rustdesk}" = screen-sharing ]; then
+    QA_TAILNET_IP="$(sed -n 's/^TAILNET_IP=//p' "$QA_CREDENTIALS")"
+    QA_TAILNET_NAME="$(sed -n 's/^TAILNET_NAME=//p' "$QA_CREDENTIALS")"
+    ( umask 077
+      cat > "$QA_PLAIN" <<NOTE
+PIKY interactive QA session (macOS Screen Sharing over your tailnet)
+Run:      ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}
+macOS:    $(sw_vers -productVersion) ($(sw_vers -buildVersion)), runner label ${QA_RUNNER_LABEL:-?}
+Open for: ${QA_SESSION_MINUTES:-?} minutes from $(date -u '+%Y-%m-%d %H:%M UTC')
+
+With Tailscale connected on your Mac: Finder > Go > Connect to Server
+  Address:   vnc://$QA_TAILNET_IP        (or vnc://${QA_TAILNET_NAME:-the node named piky-qa in your tailnet})
+  User name: $QA_ADMIN
+  Password:  $ADMIN_PASSWORD
+
+If macOS offers "Ask to share the display" or "Log in as yourself", choose
+"Log in as yourself": nobody is at that Mac to say yes. You then get a desktop
+of your own as $QA_ADMIN, who is an administrator: macOS's password prompts take
+the same name and password. The QA kit is in /Users/Shared/PIKY-QA.
+
+The password exists only for this session. The Mac is destroyed when it ends.
+NOTE
+    )
+  else
   ( umask 077
     cat > "$QA_PLAIN" <<NOTE
 PIKY interactive QA session
@@ -220,14 +312,22 @@ Connect with RustDesk (rustdesk.com, version $RUSTDESK_VERSION or newer):
   ID:        $RUSTDESK_ID
   Password:  $RUSTDESK_PASSWORD
 
+Once connected, in the toolbar at the top of the remote window:
+  Display Settings   Optimize reaction time; Mute on; leave "Disable clipboard" off;
+                     Show quality monitor on (it shows delay and whether you are relayed)
+  Keyboard Settings  Translate mode (if a typed key arrives wrong, try Map mode)
+First type a line in TextEdit on the remote Mac. Go on only if every key arrives.
+
 When macOS asks for an administrator (Open Anyway, Accessibility, Screen Recording),
-replace the name it shows with this one:
+replace the name it shows with this one, and TYPE the password (12 lowercase
+letters and digits, no hyphen):
   User name: $QA_ADMIN
   Password:  $ADMIN_PASSWORD
 
 Both passwords exist only for this session. The Mac is destroyed when it ends.
 NOTE
   )
+  fi
   # AES-256, key stretched from the owner's passphrase. Only ciphertext leaves this machine.
   /usr/bin/openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt -in "$QA_PLAIN" -out "$QA_OUT/session.txt.enc" -pass env:QA_SESSION_PASSPHRASE
   rm -f "$QA_PLAIN"
@@ -249,10 +349,12 @@ keep-alive)
   QA_MINUTES="${QA_SESSION_MINUTES:?}"
   QA_END=$(( $(date +%s) + QA_MINUTES * 60 ))
   QA_TOLD=0
+  QA_RESTARTS=0
   say "The session is open for $QA_MINUTES minutes, or until its END SESSION file on the Desktop is deleted."
   while [ "$(date +%s)" -lt "$QA_END" ] && [ -e "$QA_END_FILE" ]; do
-    if ! pgrep -x RustDesk >/dev/null 2>&1; then
-      say "RustDesk was not running: started again."
+    if [ -x "$RUSTDESK_BIN" ] && ! pgrep -x RustDesk >/dev/null 2>&1; then
+      QA_RESTARTS=$((QA_RESTARTS + 1))
+      say "$(date -u '+%H:%M:%S UTC'): RustDesk was not running: started again (time $QA_RESTARTS)."
       nohup "$RUSTDESK_BIN" >/dev/null 2>&1 &
     fi
     QA_NOW="$(date +%s)"
@@ -263,6 +365,7 @@ keep-alive)
     sleep 10
   done
   if [ -e "$QA_END_FILE" ]; then say "The time is up."; else say "The tester ended the session."; fi
+  say "RustDesk had to be started again $QA_RESTARTS time(s) during the session."
   ;;
 
 collect)
@@ -280,6 +383,20 @@ collect)
     find "$QA_KIT/Results" -type f -size -40000k \
       ! -name '*.dmg' ! -name '*.pkg' ! -name '*.zip' ! -name '*.app' ! -name '*.mov' ! -name '*.mp4' ! -name '.DS_Store' \
       -exec cp {} "$QA_EVIDENCE/results/" \; 2>/dev/null || true
+  fi
+  if [ -d "$QA_SHARED_KIT/Results" ]; then
+    sudo -n find "$QA_SHARED_KIT/Results" -type f -size -40000k \
+      ! -name '*.dmg' ! -name '*.pkg' ! -name '*.zip' ! -name '*.app' ! -name '*.mov' ! -name '*.mp4' ! -name '.DS_Store' \
+      -exec cp {} "$QA_EVIDENCE/results/" \; 2>/dev/null || true
+  fi
+  if id "$QA_ADMIN" >/dev/null 2>&1 && sudo -n test -d "/Users/$QA_ADMIN/Library"; then
+    # The same records, from the temporary administrator's own account (Screen Sharing sessions run as that user).
+    sudo -n cp "/Users/$QA_ADMIN/Library/Logs/PIKY QA TestReceiver/received.jsonl" "$QA_EVIDENCE/receiver/received-$QA_ADMIN.jsonl" 2>/dev/null || true
+    sudo -n cp -R "/Users/$QA_ADMIN/Library/Application Support/PIKY/Diagnostics" "$QA_EVIDENCE/piky-diagnostics-$QA_ADMIN" 2>/dev/null || true
+    for QA_FILE in $(sudo -n find "/Users/$QA_ADMIN/Downloads" -maxdepth 1 -name 'PIKY-*.dmg' 2>/dev/null | head -3); do
+      echo "== $QA_ADMIN downloaded $(basename "$QA_FILE"): SHA-256 $(sudo -n shasum -a 256 "$QA_FILE" | cut -d' ' -f1); quarantine: $(sudo -n xattr -p com.apple.quarantine "$QA_FILE" 2>/dev/null || echo absent)"
+    done > "$QA_EVIDENCE/gatekeeper/downloads-$QA_ADMIN.txt" 2>&1 || true
+    sudo -n chown -R "$(id -un)" "$QA_EVIDENCE" 2>/dev/null || true
   fi
   # What TestReceiver was handed (QA fixtures only).
   cp "$HOME/Library/Logs/PIKY QA TestReceiver/received.jsonl" "$QA_EVIDENCE/receiver/" 2>/dev/null || true
@@ -325,6 +442,9 @@ collect)
 
 teardown)
   runner_only
+  sudo -n launchctl bootout system/com.apple.screensharing >/dev/null 2>&1 || true
+  sudo -n launchctl disable system/com.apple.screensharing >/dev/null 2>&1 || true
+  sudo -n rm -rf "$QA_SHARED_KIT"
   pkill -x RustDesk >/dev/null 2>&1 || true
   sudo -n pkill -x RustDesk >/dev/null 2>&1 || true
   rm -rf "$RUSTDESK_APP" "$HOME/Library/Preferences/com.carriez.RustDesk" "$HOME/Library/Application Support/RustDesk" "$HOME/Library/Logs/RustDesk"

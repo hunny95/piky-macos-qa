@@ -64,7 +64,7 @@ documentation and source:
 | Uploads the passwords in a plain-text artifact and calls it private | It is not private in a public repository. Here only ciphertext is uploaded. |
 | Prints the password in its set-up script, relies on masking alone | Passwords are never printed; masking is the second lock. |
 | Downloads RustDesk with no checksum | One release, pinned by SHA-256; the signature is verified before it starts. |
-| 12-character passwords, also written to `GITHUB_ENV` | About 99 bits each, kept in one private file, never in the environment. |
+| 12-character passwords, also written to `GITHUB_ENV` | Kept in one private file, never in the environment. The RustDesk password is about 99 bits (pasted on your own Mac). The temporary administrator's is 12 lowercase letters and digits, about 59 bits, because it has to be typed by hand into macOS's password box over a remote desktop. |
 | Cloudflare WARP, IP tracking and rotation, Parsec, larger runners, six-hour and chained sessions | None of it. One standard runner, 5 to 120 minutes. |
 
 ## What is not known until a session is run
@@ -77,6 +77,30 @@ documentation and source:
   any administrator's name and password in that sheet, and the workflow checks
   that macOS accepts these before the session opens. The sheet itself is only
   proven when a person types into it.
+
+## What the first sessions showed
+
+| | Sonoma, 14.8.9 (run 37660900631) | Tahoe, 26.6.2 (run 37671258943) |
+| --- | --- | --- |
+| RustDesk shows the desktop, pointer works | Yes | Yes (download, drag into Applications) |
+| Typing the administrator's password into macOS's sheet | Worked: Open Anyway was completed | **Could not be done.** PIKY stayed blocked by Gatekeeper |
+| RustDesk had to be started again | 0 times | 1 time, 29 minutes in |
+| Result | Manual QA passed | **Remote-control tool limitation.** PIKY never ran, so nothing was learnt about PIKY |
+
+Why the keys did not arrive on Tahoe is not known. It may be the link (lag,
+dropped keys, the long hyphenated password that run still used), or macOS 26
+may not accept keys injected by a remote-desktop tool in its password sheet.
+The first can be improved; the second cannot, whatever the settings.
+
+On the controlling side, in the toolbar of the remote window: **Display
+Settings** › Optimize reaction time, Mute, Show quality monitor; **Keyboard
+Settings** › Translate mode (Map mode if a key arrives wrong). Type a line in
+TextEdit on the remote Mac before anything else.
+
+Before a session is announced, RustDesk must now stand for 60 seconds as one
+process with one ID. That is the only part of "is the connection good" a
+workflow can see by itself: whether a person's keys and pointer arrive needs a
+second machine connecting as that person would.
 
 ## Things to know
 

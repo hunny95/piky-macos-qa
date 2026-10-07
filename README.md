@@ -75,8 +75,8 @@ Every check ends as one of:
 | | |
 | --- | --- |
 | `.github/workflows/headed-qa.yml` | The run. Manual, owner only, no secrets. |
-| `.github/workflows/interactive-desktop.yml` | A temporary desktop over a private network. Prepared, **not usable** until three secrets exist: `docs/INTERACTIVE.md`. |
 | `.github/workflows/interactive-macos-qa.yml`, `interactive/` | A person tests by hand on a temporary hosted Mac through RustDesk. Manual, owner only, needs one secret: `docs/INTERACTIVE-RUSTDESK.md`. |
+| `.github/workflows/interactive-screen-sharing.yml` | The same session through macOS Screen Sharing over a private tailnet. A fallback, prepared and **never run**; needs two more secrets: `docs/INTERACTIVE-SCREEN-SHARING.md`. |
 | `harness/run.py` | The stages above, and what counts as a pass |
 | `harness/simulate.py` | A stand-in for the Mac, to walk `run.py` through without one: `QA_SIMULATE=1 QA_OUT=/tmp/x python3 harness/run.py` |
 | `tools/qa/` | The driver: events, Accessibility reading, screenshot measurements |
