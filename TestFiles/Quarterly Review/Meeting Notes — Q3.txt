@@ -1,0 +1,4 @@
+Meeting Notes — Q3
+
+Attendees: A, B, C (invented).
+Decision: ship the checkout fix on Tuesday.

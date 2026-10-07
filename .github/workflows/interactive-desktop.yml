@@ -1,0 +1,120 @@
+# A TEMPORARY desktop on a GitHub-hosted macOS runner, reachable only over
+# your own private Tailscale network, for looking at something by hand.
+#
+# NOT READY TO RUN: it needs three secrets that do not exist yet. Read
+# docs/INTERACTIVE.md first. Without them the first step stops the job.
+#
+# What it never does: open a public port, start a tunnel service, print a
+# password or a key, keep a machine. The node joins your tailnet as an
+# ephemeral device and is removed when the job ends; GitHub then destroys the
+# machine. Started by hand, by the owner of this repository only.
+name: Interactive desktop (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'GitHub-hosted macOS'
+        type: choice
+        options: [macos-14, macos-15, macos-26]
+        default: macos-14
+      minutes:
+        description: 'How long the desktop stays up'
+        type: choice
+        options: ['15', '30', '45']
+        default: '15'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: interactive-desktop
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    name: Temporary desktop on ${{ inputs.macos }}
+    if: github.actor == github.repository_owner
+    runs-on: ${{ inputs.macos }}
+    timeout-minutes: 60
+    # The secrets belong to this environment, so no other workflow can read
+    # them, and a required reviewer can be added to it in the repository settings.
+    environment: interactive-desktop
+    steps:
+      - name: The three secrets exist (the job stops here until they do)
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          QA_DESKTOP_PASSWORD: ${{ secrets.QA_DESKTOP_PASSWORD }}
+        run: |
+          MISSING=''
+          for NAME in TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET QA_DESKTOP_PASSWORD; do
+            [ -n "${!NAME:-}" ] || MISSING="$MISSING $NAME"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Not set in the interactive-desktop environment:$MISSING. See docs/INTERACTIVE.md. Nothing was started."
+            exit 1
+          fi
+          if [ "${#QA_DESKTOP_PASSWORD}" -lt 20 ]; then
+            echo "::error::QA_DESKTOP_PASSWORD must be at least 20 characters. Nothing was started."; exit 1
+          fi
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+            echo "::error::Standard GitHub-hosted runners only."; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the QA tools (TestReceiver, driver) for use by hand
+        run: |
+          NEWEST="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | grep -viE 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -n "$NEWEST" ]; then sudo -n xcode-select -s "$NEWEST/Contents/Developer" || true; fi
+          bash harness/build-tools.sh "$HOME/PIKY-QA-Tools"
+          cp -R TestFiles "$HOME/PIKY-QA-Files"
+          cp -R TestPage "$HOME/PIKY-QA-Page"
+
+      # Signing in over Screen Sharing uses the macOS account. The password is
+      # yours, from the secret; it is never echoed, and the account dies with
+      # the machine.
+      - name: Give the runner account the session password
+        env:
+          QA_DESKTOP_PASSWORD: ${{ secrets.QA_DESKTOP_PASSWORD }}
+        run: sudo -n dscl . -passwd "/Users/$USER" "$QA_DESKTOP_PASSWORD"
+
+      # Tailscale's own action, pinned to a commit. It builds tailscale from
+      # source on macOS, joins as a pre-approved EPHEMERAL node carrying the
+      # tag below, masks the secret, and logs the node out in its post step.
+      - name: Join your tailnet as an ephemeral node
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:piky-qa
+          hostname: piky-qa-${{ inputs.macos }}
+          log-mode: quiet
+
+      - name: Screen Sharing on, for this job only
+        run: |
+          sudo -n launchctl enable system/com.apple.screensharing
+          sudo -n launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          echo "Screen Sharing is on. Connect from a device on your tailnet to the node named piky-qa-${{ inputs.macos }} (user: $USER)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The desktop stays up (delete ~/KEEP-OPEN on it to end early)
+        env:
+          QA_MINUTES: ${{ inputs.minutes }}
+        run: |
+          touch "$HOME/KEEP-OPEN"
+          END=$(( $(date +%s) + QA_MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$END" ] && [ -e "$HOME/KEEP-OPEN" ]; do sleep 10; done
+          echo "The session is over."
+
+      - name: Screen Sharing off
+        if: always()
+        run: |
+          sudo -n launchctl bootout system/com.apple.screensharing || true
+          sudo -n launchctl disable system/com.apple.screensharing || true

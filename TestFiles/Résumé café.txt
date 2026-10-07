@@ -1,0 +1,2 @@
+Résumé — café, naïve, façade.
+QA fixture for PIKY. Invented content.

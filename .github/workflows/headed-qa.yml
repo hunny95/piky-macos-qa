@@ -1,0 +1,115 @@
+# The published PIKY disk image on ONE GitHub-hosted macOS, driven the way a
+# person drives it: Safari downloads it, Finder copies it, macOS decides
+# whether it may open, real keys and a real pointer do the rest.
+#
+# Started by hand only (Actions › Headed QA › Run workflow), one macOS per
+# run, by the owner of this repository only. It uses a standard GitHub-hosted
+# runner: free for a public repository, and destroyed when the job ends.
+# No secret is read and none exists in this repository.
+name: Headed QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: 'GitHub-hosted macOS (one per run; Sonoma first)'
+        type: choice
+        options: [macos-14, macos-15, macos-26]
+        default: macos-14
+      account_password:
+        description: 'Set a random one-run password on the disposable runner account, to answer macOS admin prompts in their own window'
+        type: boolean
+        default: true
+      probe_screen_sharing:
+        description: 'At the end: can Screen Sharing be switched on here? (a few seconds, then off again)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Every step runs under bash with -e and -o pipefail.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: headed-qa
+  cancel-in-progress: false
+
+jobs:
+  headed:
+    name: Headed QA on ${{ inputs.macos }}
+    if: github.actor == github.repository_owner
+    runs-on: ${{ inputs.macos }}
+    timeout-minutes: 50
+    env:
+      NO_COLOR: '1'
+      QA_RUNNER_LABEL: ${{ inputs.macos }}
+      QA_OUT: ${{ github.workspace }}/evidence
+      QA_TOOLS: ${{ github.workspace }}/build
+      QA_ALLOW_ACCOUNT_PASSWORD: ${{ inputs.account_password }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: A standard GitHub-hosted Apple silicon runner of the macOS asked for
+        run: |
+          sw_vers; uname -m
+          echo "runner: ${RUNNER_NAME:-?} (${RUNNER_ENVIRONMENT:-?}), image ${ImageOS:-?} ${ImageVersion:-?}"
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "$(uname -m)" != arm64 ]; then
+            echo "::error::This workflow runs on standard GitHub-hosted Apple silicon runners only."; exit 1
+          fi
+          if [ "$(sw_vers -productVersion | cut -d. -f1)" != "${QA_RUNNER_LABEL#macos-}" ]; then
+            echo "::error::Asked for $QA_RUNNER_LABEL but this machine is macOS $(sw_vers -productVersion)."; exit 1
+          fi
+
+      - name: Fixtures are the committed ones
+        run: |
+          /usr/bin/python3 TestFiles/generate.py --check
+          /usr/bin/python3 TestPage/build.py --check
+
+      - name: Build the QA tools here (driver and TestReceiver)
+        run: |
+          NEWEST="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | grep -viE 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -n "$NEWEST" ]; then sudo -n xcode-select -s "$NEWEST/Contents/Developer" || true; fi
+          swift --version
+          bash harness/build-tools.sh "$QA_TOOLS"
+
+      - name: Headed run
+        run: /usr/bin/python3 harness/run.py
+
+      - name: Can Screen Sharing be switched on here?
+        if: always() && inputs.probe_screen_sharing
+        continue-on-error: true
+        run: bash harness/screen-sharing-probe.sh "$QA_OUT/os/screen-sharing-probe.txt"
+
+      - name: Nothing secret in the evidence
+        if: always()
+        run: bash harness/check-evidence.sh "$QA_OUT"
+
+      - name: Results
+        if: always()
+        run: |
+          if [ -f "$QA_OUT/RESULTS.md" ]; then head -c 900000 "$QA_OUT/RESULTS.md" >> "$GITHUB_STEP_SUMMARY"
+          else echo "The run wrote no RESULTS.md." >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: piky-headed-qa-${{ inputs.macos }}-run${{ github.run_number }}-attempt${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+      # GitHub destroys the machine; this is only good manners on the way out.
+      - name: Leave nothing behind
+        if: always()
+        run: |
+          pkill -f '/Applications/PIKY.app/Contents/MacOS/PIKY' || true
+          killall TestReceiver Safari TextEdit 2>/dev/null || true
+          for VOLUME in /Volumes/PIKY*; do [ -d "$VOLUME" ] && hdiutil detach "$VOLUME" -force -quiet || true; done
+          rm -rf /Applications/PIKY.app "$HOME/Library/Application Support/PIKY" "$HOME/PIKY-QA-Files" "$HOME/PIKY QA Text.txt"
+          defaults delete app.getpiky.mac >/dev/null 2>&1 || true

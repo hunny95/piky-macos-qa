@@ -1,0 +1,20 @@
+.DS_Store
+.build/
+build/
+evidence/
+__pycache__/
+*.pyc
+
+# Never here: the app, disk images, signing material, recordings, environment files.
+*.app
+*.dmg
+*.pkg
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.mov
+*.mp4
+.env*

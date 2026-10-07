@@ -1,0 +1,31 @@
+{
+  "note": "The single source of the QA page's layout. Rectangles are [x, y, width, height] in CSS pixels from the page's top-left corner, at 100% zoom. build.py writes index.html from this file; the Camera fixture tests read the same rectangles.",
+  "viewport": { "width": 1200, "height": 800 },
+  "elements": [
+    { "id": "page", "kind": "page", "label": "PIKY QA page", "rect": [0, 0, 1200, 2000] },
+
+    { "id": "title", "kind": "heading", "parent": "page", "label": "Checkout health — QA fixture", "rect": [40, 24, 1120, 48] },
+    { "id": "intro", "kind": "paragraph", "parent": "page", "label": "Intro paragraph", "rect": [40, 96, 720, 200] },
+    { "id": "photo", "kind": "image", "parent": "page", "label": "Harbour at dusk, drawn", "rect": [800, 96, 360, 220] },
+
+    { "id": "metrics", "kind": "section", "parent": "page", "label": "Metrics", "rect": [40, 340, 1120, 420] },
+    { "id": "card-revenue", "kind": "card", "parent": "metrics", "label": "Revenue", "rect": [60, 400, 340, 340] },
+    { "id": "chart-revenue", "kind": "chart-bars", "parent": "card-revenue", "label": "Revenue by month, bar chart", "rect": [80, 470, 300, 220] },
+    { "id": "card-errors", "kind": "card", "parent": "metrics", "label": "Checkout errors", "rect": [430, 400, 340, 340] },
+    { "id": "chart-errors", "kind": "chart-line", "parent": "card-errors", "label": "Checkout error rate, line chart", "rect": [450, 470, 300, 220] },
+    { "id": "card-users", "kind": "card", "parent": "metrics", "label": "Active users", "rect": [800, 400, 340, 340] },
+    { "id": "sparkline-users", "kind": "chart-line", "parent": "card-users", "label": "Active users, sparkline", "rect": [820, 590, 300, 100] },
+
+    { "id": "team", "kind": "group", "parent": "page", "label": "On call this week", "rect": [40, 800, 1120, 300] },
+    { "id": "member-1", "kind": "card", "parent": "team", "label": "Primary on call", "rect": [60, 860, 340, 200] },
+    { "id": "avatar-1", "kind": "avatar", "parent": "member-1", "label": "Avatar, pink", "rect": [80, 880, 96, 96] },
+    { "id": "member-2", "kind": "card", "parent": "team", "label": "Secondary on call", "rect": [430, 860, 340, 200] },
+    { "id": "avatar-2", "kind": "avatar", "parent": "member-2", "label": "Avatar, teal", "rect": [450, 880, 96, 96] },
+    { "id": "member-3", "kind": "card", "parent": "team", "label": "Incident lead", "rect": [800, 860, 340, 200] },
+    { "id": "avatar-3", "kind": "avatar", "parent": "member-3", "label": "Avatar, amber", "rect": [820, 880, 96, 96] },
+
+    { "id": "log", "kind": "scroll", "parent": "page", "label": "Activity log", "rect": [40, 1140, 1120, 300], "rows": 40 },
+
+    { "id": "story", "kind": "paragraph", "parent": "page", "label": "Long paragraph", "rect": [40, 1480, 720, 480] }
+  ]
+}
