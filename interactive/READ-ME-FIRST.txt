@@ -1,0 +1,42 @@
+PIKY interactive QA: you are on a temporary Mac that GitHub destroys when
+this session ends.
+
+BEFORE YOU START, ON YOUR OWN MAC
+  Quit PIKY (and Raycast or Alfred, if they use Option-Space). A shortcut
+  held by an app on your Mac never reaches this one.
+
+ON THIS MAC
+  PIKY is not installed. Install it the way a person does:
+    1. Double-click "Download PIKY (opens Safari)" in this folder, or type
+       the release address into Safari. Allow the download.
+    2. Open the disk image in Downloads. Drag PIKY onto Applications.
+    3. Open PIKY from Applications. macOS will refuse the first time.
+    4. System Settings > Privacy & Security > scroll down > Open Anyway.
+
+  WHEN macOS ASKS FOR AN ADMINISTRATOR'S PASSWORD
+    The box shows this Mac's own account name. Replace the NAME with the
+    temporary administrator from your session note, and type its password:
+        name:      pikyqa
+        password:  (in your session note)
+    The same name and password work for Accessibility and Screen Recording.
+
+  IN THIS FOLDER
+    Files/            fixture files for Finder Picks
+    Page/index.html   the QA page for Camera and text Picks (open in Safari)
+    TestReceiver      the message box that records what Command-Return delivers
+    Results/          put your notes and screenshots here
+
+  Screenshots taken on this Mac (Shift-Command-3 or 4) are saved in Results.
+
+EVERYTHING IN "Results" BECOMES PUBLIC
+  It is uploaded as an artifact of a public repository when the session ends.
+  Do not put a password in it. Do not photograph the RustDesk window or your
+  session note.
+
+DO NOT SIGN IN TO ANYTHING
+  No Apple ID, no GitHub, no mail. This Mac is not yours and is not private.
+
+TO END THE SESSION
+  Move "END SESSION - delete this file" to the Trash. The evidence is then
+  collected and the Mac is destroyed. It also ends by itself when its time
+  is up.

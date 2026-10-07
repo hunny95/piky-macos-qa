@@ -1,0 +1,30 @@
+PIKY interactive QA checklist. Write PASS, FAIL or N/A after each line, and
+what you saw. This file is uploaded publicly when the session ends.
+
+macOS version (Apple menu > About This Mac):
+Tester, date:
+
+ 1. Safari downloads the disk image:
+ 2. Disk image opens; PIKY dragged to Applications:
+ 3. First open is refused by macOS. Exact words:
+ 4. Privacy & Security shows Open Anyway:
+ 5. Open Anyway + temporary administrator's name and password:
+ 6. PIKY opens afterwards:
+ 7. First-run window, Continue label readable (window active / inactive):
+ 8. PIKY asks for Accessibility; macOS dialog appears:
+ 9. PIKY switched on under Accessibility (temporary administrator):
+10. The first-run window continues by itself:
+11. Option-Space starts picking:
+12. Text Pick (select a paragraph):
+13. Finder file Pick (Files folder). Did macOS ask about the Desktop folder?
+14. Camera: PIKY asks for Screen Recording; granted; PIKY restarts once:
+15. Camera click on a chart (what was outlined was taken):
+16. Camera scope by Option-scroll:
+17. Camera region by Option-drag:
+18. Undo with the arrow beside PIKY in the menu bar:
+19. New Pack; Library; open the saved Pack:
+20. Command-Return into TestReceiver (count and order as picked):
+21. Quit and reopen: no first-run window, Pack still there:
+22. Anything that looked wrong:
+
+How the remote desktop felt (lag, keys that did not arrive):

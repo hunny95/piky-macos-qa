@@ -1,0 +1,146 @@
+# A person tests PIKY by hand on a temporary GitHub-hosted Mac, through
+# RustDesk, with their own mouse and keyboard.
+#
+# Started by hand only, by the owner of this repository only, on a standard
+# GitHub-hosted Apple silicon runner (free for a public repository). The
+# machine is destroyed when the job ends.
+#
+# It needs ONE repository secret, QA_SESSION_PASSPHRASE: a passphrase the
+# owner chooses. Artifacts of a public repository can be downloaded by anyone
+# who is signed in to GitHub, so the session's RustDesk ID and its two random
+# passwords are uploaded only as ciphertext that this passphrase opens.
+# Nothing readable about the session is ever in a log, a summary or an
+# artifact. See docs/INTERACTIVE-RUSTDESK.md.
+name: Interactive macOS QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos_version:
+        description: 'macOS (one session at a time; Sonoma first)'
+        type: choice
+        options: ['14', '15', '26']
+        default: '14'
+      session_minutes:
+        description: 'How long the Mac stays up, in minutes (5 to 120)'
+        type: string
+        default: '60'
+
+permissions:
+  contents: read
+
+# Every step runs under bash with -e and -o pipefail, and never with -x.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: interactive-macos-qa
+  cancel-in-progress: false
+
+jobs:
+  session:
+    name: Interactive QA on macOS ${{ inputs.macos_version }}
+    if: github.actor == github.repository_owner
+    runs-on: macos-${{ inputs.macos_version }}
+    timeout-minutes: 165
+    env:
+      NO_COLOR: '1'
+      QA_RUNNER_LABEL: macos-${{ inputs.macos_version }}
+      QA_SESSION_MINUTES: ${{ inputs.session_minutes }}
+      QA_TOOLS: ${{ github.workspace }}/build
+    steps:
+      - name: The session can be opened safely (it stops here if not)
+        env:
+          QA_SESSION_PASSPHRASE: ${{ secrets.QA_SESSION_PASSPHRASE }}
+        run: |
+          if [ -z "${QA_SESSION_PASSPHRASE:-}" ]; then
+            echo "::error::The repository secret QA_SESSION_PASSPHRASE is not set. Without it the session's details could only be uploaded readable by anyone, so nothing was started. See docs/INTERACTIVE-RUSTDESK.md."
+            exit 1
+          fi
+          if [ "${#QA_SESSION_PASSPHRASE}" -lt 20 ]; then
+            echo "::error::QA_SESSION_PASSPHRASE must be at least 20 characters. Nothing was started."; exit 1
+          fi
+          case "$QA_SESSION_MINUTES" in ''|*[!0-9]*) echo "::error::session_minutes must be a whole number."; exit 1 ;; esac
+          if [ "$QA_SESSION_MINUTES" -lt 5 ] || [ "$QA_SESSION_MINUTES" -gt 120 ]; then
+            echo "::error::session_minutes must be between 5 and 120."; exit 1
+          fi
+          sw_vers; uname -m
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "$(uname -m)" != arm64 ]; then
+            echo "::error::This workflow runs on standard GitHub-hosted Apple silicon runners only."; exit 1
+          fi
+          if [ "$(sw_vers -productVersion | cut -d. -f1)" != "${QA_RUNNER_LABEL#macos-}" ]; then
+            echo "::error::Asked for $QA_RUNNER_LABEL but this machine is macOS $(sw_vers -productVersion)."; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the QA tools here and lay out the kit (PIKY itself is not installed)
+        run: |
+          /usr/bin/python3 TestFiles/generate.py --check
+          /usr/bin/python3 TestPage/build.py --check
+          NEWEST="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | grep -viE 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -n "$NEWEST" ]; then sudo -n xcode-select -s "$NEWEST/Contents/Developer" || true; fi
+          bash harness/build-tools.sh "$QA_TOOLS"
+          bash interactive/session.sh kit
+
+      - name: Two random passwords for this session (masked at once)
+        run: bash interactive/session.sh credentials
+
+      - name: A temporary administrator, for macOS's own password prompts
+        run: bash interactive/session.sh admin-create
+
+      - name: RustDesk, one pinned release, checked against its SHA-256
+        run: bash interactive/session.sh rustdesk-install
+
+      - name: Start RustDesk with the session password
+        run: bash interactive/session.sh rustdesk-start
+
+      - name: Encrypt the session's details for the repository owner
+        env:
+          QA_SESSION_PASSPHRASE: ${{ secrets.QA_SESSION_PASSPHRASE }}
+        run: bash interactive/session.sh session-note
+
+      - name: Upload the encrypted session note (ciphertext only)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: piky-interactive-session-${{ github.run_id }}
+          path: session-artifact/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: The session is open
+        run: |
+          {
+            echo "## The Mac is ready: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+            echo
+            echo "Open for $QA_SESSION_MINUTES minutes. The RustDesk ID and both passwords are in the artifact"
+            echo "\`piky-interactive-session-$GITHUB_RUN_ID\`, encrypted with QA_SESSION_PASSPHRASE. Nothing readable is published."
+            echo
+            echo "To end early: on the Mac, move \"END SESSION - delete this file\" (Desktop › PIKY-QA) to the Trash."
+          } >> "$GITHUB_STEP_SUMMARY"
+          bash interactive/session.sh keep-alive
+
+      - name: Collect privacy-safe evidence
+        if: always()
+        run: bash interactive/session.sh collect
+
+      - name: Nothing secret in the evidence
+        if: always()
+        run: bash harness/check-evidence.sh "$GITHUB_WORKSPACE/evidence"
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: piky-interactive-qa-macos-${{ inputs.macos_version }}-run${{ github.run_number }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # GitHub destroys the machine; this makes sure nothing of the session outlives the step.
+      - name: Stop RustDesk, delete the temporary administrator and every credential
+        if: always()
+        run: bash interactive/session.sh teardown
