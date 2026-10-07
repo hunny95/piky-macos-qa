@@ -15,7 +15,7 @@ import plistlib
 BLOCKED = os.environ.get("QA_SIMULATE") == "blocked"
 HOME = os.path.expanduser("~")
 RELEASE_NAME = "PIKY-0.2.0-universal.dmg"
-TOY = {"running": False, "count": 0, "picking": False, "onboarding": 0, "windows": ["Meet PIKY"], "alert": False, "front": "com.apple.finder",
+TOY = {"held": False, "running": False, "count": 0, "picking": False, "onboarding": 0, "windows": ["Meet PIKY"], "alert": False, "front": "com.apple.finder",
        "receiver_log": None, "packs": {}, "menu": False, "last_find": "", "launches": 0, "settings_pane": False, "opt": False}
 
 
@@ -27,7 +27,7 @@ def run(command):
         return 0, "14.8.9\n" if "-productVersion" in command else "23J999\n" if "-buildVersion" in command else "ProductName: macOS\nProductVersion: 14.8.9\n", ""
     if name == "pgrep":
         if "PIKY" in joined:
-            return (0, "4242\n", "") if TOY["running"] else (1, "", "")
+            return (0, "4242\n", "") if TOY["running"] or TOY["held"] else (1, "", "")
         return 1, "", ""
     if name == "ls":
         if joined.endswith("/Downloads"):
@@ -50,6 +50,7 @@ def run(command):
             TOY["launches"] += 1
             if BLOCKED and TOY["launches"] == 1:
                 TOY["alert"] = True
+                TOY["held"] = True  # macOS makes the process and holds it behind its alert
             else:
                 TOY["running"] = True
         if "--log" in command:
@@ -65,6 +66,7 @@ def run(command):
         return 0, "AAAAAAAA-0000-0000-0000-000000000001\n", ""
     if name == "kill":
         TOY["running"] = False
+        TOY["held"] = False
         return 0, "", ""
     if name == "PIKY":
         if "--piky-permission-check" in command:
@@ -200,6 +202,7 @@ def qa(arguments):
             TOY["running"], TOY["alert"] = True, False
         elif last in ("OK", "Done", "Cancel"):
             TOY["alert"] = False
+            TOY["held"] = False
         elif TOY["picking"] and (verb == "drag" or option(arguments, "--count") == "3" or option(arguments, "--mods") == "opt" or last.endswith((".txt", ".png", ".pdf"))):
             TOY["count"] += 1
         TOY["last_find"] = ""

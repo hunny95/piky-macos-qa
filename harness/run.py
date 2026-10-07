@@ -158,8 +158,30 @@ def piky_pids():
     return [int(line) for line in out.split() if line.isdigit()] if code == 0 else []
 
 
+def piky_entries():
+    """Every process of PIKY's binary, whatever its arguments or location."""
+    code, out, _ = run(["/usr/bin/pgrep", "-f", "/PIKY.app/Contents/MacOS/PIKY"], quiet=True)
+    return [int(line) for line in out.split() if line.isdigit()] if code == 0 else []
+
+
 def piky_running():
-    return bool(piky_pids())
+    """Is PIKY really up? Only if its process exists AND its menu-bar item
+    answers. A process entry alone proves nothing: while Gatekeeper's alert is
+    on screen macOS has already created PIKY's process and holds it,
+    unstarted (second Sonoma run: a pid, no log line, no window, no menu-bar
+    item, no shortcut)."""
+    return bool(piky_pids()) and piky_status() is not None
+
+
+def end_piky(politely=True):
+    """Ends every PIKY process, the held ones included."""
+    if politely:
+        for pid in piky_pids():
+            run(["/bin/kill", "-TERM", str(pid)], quiet=True)
+        wait_for(lambda: not piky_pids(), 10, 0.4)
+    for pid in piky_entries():
+        run(["/bin/kill", "-9", str(pid)], quiet=True)
+    return bool(wait_for(lambda: not piky_entries(), 6, 0.4)) or not piky_entries()
 
 
 def frontmost():
@@ -575,6 +597,9 @@ def gatekeeper_follow(label, seconds):
         if piky_running():
             return True, notes
         moved = translocated_pids()
+        said = read_dialog(BUNDLE) if moved else {"texts": []}
+        if moved and not said["texts"]:
+            moved = []  # a held, unstarted entry behind an alert: not a PIKY that started
         if moved:
             pause(1.5)
             said = read_dialog(BUNDLE)
@@ -656,27 +681,31 @@ def stage_gatekeeper():
     opened_at = time.strftime("%Y-%m-%d %H:%M:%S")
     CTX["gatekeeper_started"] = opened_at
     spawn(["/usr/bin/open", APP])
-    seen = wait_for(lambda: piky_running() or gatekeeper_alert(), 25, 0.8)
+    seen = wait_for(lambda: gatekeeper_alert() or piky_running(), 25, 0.8)
     pause(1.0)
     alert = gatekeeper_alert()
     evidence = [shot("gatekeeper-first-open")] + dialogs("gatekeeper-first-open")
     running = piky_running()
+    held = [] if running else piky_entries()
     words = " ".join(alert["texts"]) if alert else ""
+    state = ("running, pid %s" % piky_pids()) if running else \
+        ("not started: macOS holds a process entry for it (pid %s) that has no menu-bar item and answers nothing" % held) if held else "no process at all"
     save_text("gatekeeper/first-open.txt", "\n".join([
         "open /Applications/PIKY.app at %s" % opened_at,
-        "PIKY process after the open: %s" % ("running, pid %s" % piky_pids() if running else "none"),
+        "PIKY after the open: %s" % state,
         "alert shown by macOS: %s" % ("yes" if alert else "no"),
         "exact wording: %s" % (words or "-"), "buttons: %s" % (", ".join(alert["buttons"]) if alert else "-"),
         "quarantine on the app: %s" % (app_quarantine or "absent")]))
     evidence.append("gatekeeper/first-open.txt")
     if alert and not running:
         record("Gatekeeper's first open of the browser download", PASS if "PIKY" in words else INCONCLUSIVE,
-               ("macOS refused to open it and said: “%s” [buttons: %s]. No PIKY process started. This is Gatekeeper refusing a build that is not notarized, as expected; it is not a crash."
-                % (words, ", ".join(alert["buttons"]))) if "PIKY" in words else
-               "a window of %s is up and no PIKY process started, but its words could not be read through Accessibility (read: “%s”); see the screenshot" % (alert.get("owner"), words),
+               ("macOS refused to open it and said: “%s” [buttons: %s]. PIKY did not start (%s). This is Gatekeeper refusing a build that is not notarized, as expected; it is not a crash."
+                % (words, ", ".join(alert["buttons"]), state)) if "PIKY" in words else
+               "a window of %s is up and PIKY did not start (%s), but the window's words could not be read through Accessibility (read: “%s”); see the screenshot" % (alert.get("owner"), state, words),
                evidence)
         gatekeeper_dismiss(alert)
-        pause(1.0)
+        pause(1.5)
+        log("after the alert was closed, PIKY process entries: %s" % piky_entries())
     elif running:
         CTX["launched"] = True
         record("Gatekeeper's first open of the browser download", INFO,
@@ -685,7 +714,7 @@ def stage_gatekeeper():
         return
     else:
         record("Gatekeeper's first open of the browser download", INCONCLUSIVE,
-               "after 25 s there is neither a PIKY process nor a readable alert (seen: %s); see the screenshot" % bool(seen), evidence)
+               "after 25 s there is neither a running PIKY nor a readable alert (seen: %s; PIKY: %s); see the screenshot" % (bool(seen), state), evidence)
 
     # Open Anyway, in System Settings, by hand.
     run(["/usr/bin/open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"])
@@ -770,8 +799,7 @@ def stage_second_install():
     alert = gatekeeper_alert()
     if alert:
         gatekeeper_dismiss(alert)
-    for pid in piky_pids():
-        run(["/bin/kill", "-9", str(pid)], quiet=True)
+    end_piky(politely=False)
     mounted = mount_point()
     if mounted:
         run(["/usr/bin/hdiutil", "detach", mounted, "-force"], quiet=True)
@@ -805,8 +833,8 @@ def permission_check():
     """What macOS answers PIKY itself: asked through LaunchServices, so the
     answer is for PIKY and not for whoever started this script."""
     reply = os.path.join(TEMP, "piky-permission-%s.json" % int(time.time() * 1000))
-    run(["/usr/bin/open", "-n", "-g", "-j", "--stdout", reply, APP, "--args", "--piky-permission-check"], quiet=True)
-    wait_for(lambda: os.path.exists(reply) and os.path.getsize(reply) > 0, 10, 0.3)
+    spawn(["/usr/bin/open", "-n", "-g", "-j", "--stdout", reply, APP, "--args", "--piky-permission-check"])
+    wait_for(lambda: os.path.exists(reply) and os.path.getsize(reply) > 0, 12, 0.3)
     if SIM:
         return {"accessibility": False, "screen": False}
     try:
@@ -826,8 +854,8 @@ def label_area(frame):
 
 def stage_first_run():
     STATE["stage"] = "3 First run"
-    if not CTX["launched"]:
-        record("First-run window", NOTRUN, "PIKY is not running")
+    if not CTX["launched"] or not wait_for(piky_running, 20, 0.6):
+        record("First-run window", NOTRUN, "PIKY is not running (process entries: %s)" % piky_entries())
         raise Blocked()
     quit_app("Safari")
     close_finder_windows()
@@ -972,7 +1000,7 @@ def stage_permissions():
 def stage_hotkey_without_permission():
     """⌥Space reaching a PIKY that macOS has not allowed to read other apps."""
     STATE["stage"] = "5 ⌥Space before Accessibility"
-    if CTX["own_accessibility"] or not CTX["launched"]:
+    if CTX["own_accessibility"] or not CTX["launched"] or not piky_running():
         record("⌥Space while PIKY has no Accessibility", NOTRUN, "PIKY has Accessibility" if CTX["own_accessibility"] else "PIKY is not running")
         return
     open_text_document()
@@ -1052,9 +1080,7 @@ def stage_functional_mode():
                    "PIKY cannot be given Accessibility on this runner by any means this run allows: not through System Settings (above), and started by the job it answers %s. "
                    "Picking, the Camera and ⌘Return all need it, so they cannot be exercised here." % (out.strip() or "nothing"))
             raise Blocked()
-        for pid in piky_pids():
-            run(["/bin/kill", "-TERM", str(pid)], quiet=True)
-        gone = wait_for(lambda: not piky_running(), 10, 0.4)
+        gone = end_piky()
         start_piky_from_the_job()
         up = wait_for(piky_running, 20, 0.5)
         pause(2.0)
@@ -1656,11 +1682,10 @@ def stage_library_restart():
     before_quit = library()
     count_before = count_now()
     how = status_menu("Quit PIKY")
-    quit_ok = wait_for(lambda: not piky_running(), 12, 0.4)
+    quit_ok = wait_for(lambda: not piky_pids(), 12, 0.4)
     record("Quit PIKY from its menu", PASS if quit_ok else FAIL, "PIKY's menu › Quit PIKY (%s): %s" % (how, "the process ended" if quit_ok else "the process is still running after 12 s"), [shot("after-quit")])
     if not quit_ok:
-        for pid in piky_pids():
-            run(["/bin/kill", "-9", str(pid)], quiet=True)
+        end_piky(politely=False)
     pause(1.5)
     if CTX["own_accessibility"]:
         run(["/usr/bin/open", APP])
@@ -1713,8 +1738,7 @@ def stage_collect():
                    ["logs/system.log"])
     record("PIKY processes at the end", INFO, "%s running (pid %s)" % (len(pids), pids))
     # Leave the machine as tidy as is practical; GitHub destroys it anyway.
-    for pid in piky_pids():
-        run(["/bin/kill", "-TERM", str(pid)], quiet=True)
+    end_piky()
     for name in ("TestReceiver", "TextEdit", "Safari", "System Settings"):
         run(["/usr/bin/killall", name], quiet=True)
 
