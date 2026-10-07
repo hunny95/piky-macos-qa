@@ -45,6 +45,9 @@ case "probe":
           "frontmost": ["name": front?.localizedName ?? "", "bundle": front?.bundleIdentifier ?? "", "pid": Int(front?.processIdentifier ?? 0)],
           "sessionOnConsole": session["kCGSSessionOnConsoleKey"] as? Bool ?? false,
           "sessionLoginDone": session["kCGSessionLoginDoneKey"] as? Bool ?? false,
+          // Whose login session this process is in, and whether its screen is locked.
+          "sessionUser": session["kCGSSessionUserNameKey"] as? String ?? "",
+          "screenLocked": session["CGSSessionScreenIsLocked"] as? Bool ?? false,
           "mainDisplayPoints": [Double(display.width), Double(display.height)],
           "cursor": [Double(cursor.x), Double(cursor.y)],
           "at": isoNow()])

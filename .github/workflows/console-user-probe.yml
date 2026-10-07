@@ -1,0 +1,95 @@
+# An unattended probe, one question: on a GitHub-hosted macOS 26 runner, can a
+# temporary administrator be made the user at the screen (the console user),
+# through macOS's own Fast User Switching and its login window?
+#
+# Nobody connects to this machine. No remote desktop is started, no session
+# note is made, PIKY is not installed, Gatekeeper is not touched. It uses no
+# secret. Started by hand only, by the owner of this repository only, on a
+# standard GitHub-hosted Apple silicon runner (free for a public repository).
+# See docs/CONSOLE-USER-PROBE.md.
+name: Console-user probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every step runs under bash with -e and -o pipefail, and never with -x.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: console-user-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Can the temporary administrator be the console user on macOS 26?
+    if: github.actor == github.repository_owner
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      NO_COLOR: '1'
+      QA_RUNNER_LABEL: macos-26
+      QA_TOOLS: ${{ github.workspace }}/build
+    steps:
+      - name: A standard GitHub-hosted Apple silicon runner with macOS 26 (it stops here if not)
+        run: |
+          sw_vers; uname -m
+          if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "$(uname -m)" != arm64 ]; then
+            echo "::error::This workflow runs on standard GitHub-hosted Apple silicon runners only."; exit 1
+          fi
+          if [ "$(sw_vers -productVersion | cut -d. -f1)" != 26 ]; then
+            echo "::error::Asked for macOS 26 but this machine is macOS $(sw_vers -productVersion)."; exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the QA driver here
+        run: |
+          NEWEST="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | grep -viE 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -n "$NEWEST" ]; then sudo -n xcode-select -s "$NEWEST/Contents/Developer" || true; fi
+          bash harness/build-tools.sh "$QA_TOOLS"
+          bash probe/console-user-probe.sh prepare
+
+      - name: One random password for the temporary administrator (masked at once)
+        run: bash interactive/session.sh admin-credentials
+
+      - name: The temporary administrator
+        run: bash interactive/session.sh admin-create
+
+      - name: The probe
+        timeout-minutes: 20
+        run: bash probe/console-user-probe.sh run
+
+      - name: Nothing secret in the evidence
+        if: always()
+        run: bash harness/check-evidence.sh "$GITHUB_WORKSPACE/evidence"
+
+      - name: Result
+        if: always()
+        run: |
+          if [ -f evidence/RESULT.md ]; then
+            cat evidence/RESULT.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The probe wrote no result." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the probe's evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: piky-console-user-probe-macos-26-run${{ github.run_number }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # GitHub destroys the machine; this makes sure nothing of the probe outlives the step.
+      - name: Log the temporary administrator out, delete it and its credentials
+        if: always()
+        timeout-minutes: 5
+        run: bash probe/console-user-probe.sh teardown

@@ -6,6 +6,7 @@
 #
 #   kit               the QA kit on the Desktop (fixtures, page, TestReceiver, Results)
 #   credentials       two random passwords for this session, masked, kept in a private file
+#   admin-credentials the temporary administrator's password only (a run with no remote desktop)
 #   admin-create      a temporary administrator, for macOS's own password prompts
 #   rustdesk-install  RustDesk, one pinned release, checked against its SHA-256
 #   rustdesk-start    start it, give it the session password, read its ID
@@ -129,6 +130,15 @@ credentials)
   echo "::add-mask::$RUSTDESK_PASSWORD"
   ( umask 077; printf 'ADMIN_PASSWORD=%s\nRUSTDESK_PASSWORD=%s\n' "$ADMIN_PASSWORD" "$RUSTDESK_PASSWORD" > "$QA_CREDENTIALS" )
   say "Two session passwords were made and masked. They are in a file only this job's user can read, and nowhere else."
+  ;;
+
+admin-credentials)
+  mkdir -p "$QA_STATE"
+  chmod 700 "$QA_STATE"
+  ADMIN_PASSWORD="$(new_admin_password)"
+  echo "::add-mask::$ADMIN_PASSWORD"
+  ( umask 077; printf 'ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD" > "$QA_CREDENTIALS" )
+  say "One password was made and masked. It is in a file only this job's user can read, and nowhere else."
   ;;
 
 admin-create)
