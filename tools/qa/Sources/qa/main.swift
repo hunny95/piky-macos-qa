@@ -7,7 +7,7 @@ import Foundation
 // qa: the driver the headed run uses. Every command prints one JSON object.
 // Exit status: 0 done, 1 not found / not true, 2 used wrongly or failed.
 //
-//   qa probe | screens | windows [--owner NAME] [--pid N] | apps | now
+//   qa probe | session | screens | windows [--owner NAME] [--pid N] | apps | now
 //   qa key <keycode> [--mods opt,cmd,ctrl,shift] [--hold-ms N]
 //   qa mod <down|up> <opt|cmd|ctrl|shift> [--held opt,…]      qa release
 //   qa type <text> | qa type --stdin
@@ -50,6 +50,21 @@ case "probe":
           "screenLocked": session["CGSSessionScreenIsLocked"] as? Bool ?? false,
           "mainDisplayPoints": [Double(display.width), Double(display.height)],
           "cursor": [Double(cursor.x), Double(cursor.y)],
+          "at": isoNow()])
+
+case "session":
+    // Whose login session this process is in and what it may do there. Unlike
+    // `probe` it asks macOS nothing about screen capture.
+    let front = NSWorkspace.shared.frontmostApplication
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+    emit(["ok": true,
+          "accessibilityTrusted": AXIsProcessTrusted(),
+          "postEvents": CGPreflightPostEventAccess(),
+          "frontmost": ["name": front?.localizedName ?? "", "bundle": front?.bundleIdentifier ?? "", "pid": Int(front?.processIdentifier ?? 0)],
+          "sessionOnConsole": session["kCGSSessionOnConsoleKey"] as? Bool ?? false,
+          "sessionLoginDone": session["kCGSessionLoginDoneKey"] as? Bool ?? false,
+          "sessionUser": session["kCGSSessionUserNameKey"] as? String ?? "",
+          "screenLocked": session["CGSSessionScreenIsLocked"] as? Bool ?? false,
           "at": isoNow()])
 
 case "now":

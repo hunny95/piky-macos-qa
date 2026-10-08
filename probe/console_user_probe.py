@@ -173,6 +173,17 @@ def elements(context, app, *selector):
     return data.get("elements") or []
 
 
+def find_when_ready(context, app, selector, seconds):
+    """`ax find` answers at once when an application is not running yet, whatever
+    its --timeout: ask again until the element is there or the time is up."""
+    end = time.time() + seconds
+    while True:
+        rows = [row for row in elements(context, app, *selector) if usable(row.get("frame"))]
+        if rows or time.time() >= end:
+            return rows
+        time.sleep(1.0)
+
+
 def usable(frame):
     return bool(frame) and len(frame) == 4 and frame[2] >= 4 and frame[3] >= 4 and -2 <= frame[0] < 6000 and -2 <= frame[1] < 6000
 
@@ -188,12 +199,13 @@ def click_at(context, frame, label):
     return bool(data.get("ok"))
 
 
-def outline(context, label, app, depth=24, maximum=1500):
+def outline(context, label, app, depth=24, maximum=1500, values=False):
     """What Accessibility says a window holds: roles, names and positions.
-    Never the contents of a field."""
+    Not the contents of a field, unless `values` is asked for (a system
+    dialog's wording; a password field's contents are never read at all)."""
     S["dumps"] += 1
     name = "ax/%02d-%s.txt" % (S["dumps"], label)
-    command = [driver(context), "ax", "tree"] + list(app) + ["--depth", str(depth), "--max", str(maximum), "--text", "--no-value"]
+    command = [driver(context), "ax", "tree"] + list(app) + ["--depth", str(depth), "--max", str(maximum), "--text"] + ([] if values else ["--no-value"])
     code, out, err = run(wrap(context, command), timeout=40, quiet=True)
     save_text(name, out if out.strip() else "(no Accessibility answer: %s)" % (err.strip()[:200] or "status %s" % code))
     log("outline[%s] %s -> %s (%d lines)" % (context, label, name, len(out.splitlines())))
@@ -352,8 +364,7 @@ def sink_open():
     with open(SINK, "w", encoding="utf-8"):
         pass
     run(["/usr/bin/open", "-a", "TextEdit", SINK])
-    found = qa("here", "ax", "find", "--bundle", TEXTEDIT, "--role", "AXTextArea", "--timeout", "25", quiet=True, timeout=40)
-    if not found.get("found") or not sink_focus():
+    if not find_when_ready("here", ["--bundle", TEXTEDIT], ["--role", "AXTextArea"], 45) or not sink_focus():
         NOTES.append("The sink document could not be opened in the runner's own session, so where this job's keys go could not be checked.")
         return False
     time.sleep(0.6)

@@ -77,6 +77,7 @@ Every check ends as one of:
 | `.github/workflows/headed-qa.yml` | The run. Manual, owner only, no secrets. |
 | `.github/workflows/interactive-macos-qa.yml`, `interactive/` | A person tests by hand on a temporary hosted Mac through RustDesk. Manual, owner only, needs one secret: `docs/INTERACTIVE-RUSTDESK.md`. |
 | `.github/workflows/interactive-screen-sharing.yml` | The same session through macOS Screen Sharing over a private tailnet. A fallback, prepared and **never run**; needs two more secrets: `docs/INTERACTIVE-SCREEN-SHARING.md`. |
+| `.github/workflows/interactive-own-desktop.yml`, `interactive/console_session.py` | The interactive session on a desktop that belongs to the temporary administrator, so macOS 26's Open Anyway can be answered with a known password. Needs `QA_SESSION_PASSPHRASE`: `docs/INTERACTIVE-OWN-DESKTOP.md`. |
 | `.github/workflows/console-user-probe.yml`, `probe/` | An unattended probe: can a temporary administrator be the user at the screen of a hosted macOS 26 runner, through macOS's own Fast User Switching? No secrets, nobody connects: `docs/CONSOLE-USER-PROBE.md`. |
 | `harness/run.py` | The stages above, and what counts as a pass |
 | `harness/simulate.py` | A stand-in for the Mac, to walk `run.py` through without one: `QA_SIMULATE=1 QA_OUT=/tmp/x python3 harness/run.py` |

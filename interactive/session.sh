@@ -5,6 +5,7 @@
 #   bash interactive/session.sh <step>
 #
 #   kit               the QA kit on the Desktop (fixtures, page, TestReceiver, Results)
+#   kit-desktop       (own-desktop session) the kit on the temporary administrator's Desktop
 #   credentials       two random passwords for this session, masked, kept in a private file
 #   admin-credentials the temporary administrator's password only (a run with no remote desktop)
 #   admin-create      a temporary administrator, for macOS's own password prompts
@@ -17,6 +18,13 @@
 #   collect           privacy-safe evidence into ./evidence
 #   teardown          stop RustDesk, delete the administrator and every credential
 #
+# QA_REMOTE says whose desktop the tester gets:
+#   rustdesk          (default) the runner's own desktop, through RustDesk
+#   screen-sharing    a desktop of the temporary administrator, through Screen Sharing
+#   rustdesk-console  the temporary administrator IS the user at the screen
+#                     (interactive/console_session.py logs it in), and RustDesk
+#                     runs inside that session, never under the runner's account
+#
 # What it never does: write to a TCC database, change SIP or Gatekeeper,
 # remove a quarantine attribute, print a password, or touch the runner's own
 # account. Nothing here traces its commands (no `set -x`).
@@ -28,7 +36,10 @@ QA_ADMIN=pikyqa
 QA_KIT="$HOME/Desktop/PIKY-QA"
 QA_SHARED_KIT=/Users/Shared/PIKY-QA
 QA_END_FILE="$QA_KIT/END SESSION - delete this file.txt"
-if [ "${QA_REMOTE:-rustdesk}" = screen-sharing ]; then QA_END_FILE="$QA_SHARED_KIT/END SESSION - delete this file.txt"; fi
+# When the tester's desktop is the temporary administrator's, the kit is where that user can reach it.
+QA_KIT_IS_SHARED=no
+case "${QA_REMOTE:-rustdesk}" in screen-sharing|rustdesk-console) QA_KIT_IS_SHARED=yes ;; esac
+if [ "$QA_KIT_IS_SHARED" = yes ]; then QA_END_FILE="$QA_SHARED_KIT/END SESSION - delete this file.txt"; fi
 QA_STATE="${RUNNER_TEMP:?RUNNER_TEMP is not set}/piky-interactive"
 QA_CREDENTIALS="$QA_STATE/credentials"
 QA_EVIDENCE="${GITHUB_WORKSPACE:-$QA_ROOT}/evidence"
@@ -56,7 +67,7 @@ load_credentials() {
   [ -f "$QA_CREDENTIALS" ] || fail "This session has no credentials file."
   ADMIN_PASSWORD="$(sed -n 's/^ADMIN_PASSWORD=//p' "$QA_CREDENTIALS")"
   RUSTDESK_PASSWORD="$(sed -n 's/^RUSTDESK_PASSWORD=//p' "$QA_CREDENTIALS")"
-  RUSTDESK_ID="$(sed -n 's/^RUSTDESK_ID=//p' "$QA_CREDENTIALS")"
+  RUSTDESK_ID="$(sed -n 's/^RUSTDESK_ID=//p' "$QA_CREDENTIALS" | tail -1)"
 }
 
 # The remote-desktop password: four groups of five (about 99 bits). It is
@@ -87,6 +98,44 @@ with_limit() {
   return "$status"
 }
 
+# A command inside the temporary administrator's own login session, as that
+# user. `launchctl asuser` places it in a session macOS has already created
+# (console_session.py logged that user in at the login window); it creates none.
+in_admin_session() {
+  sudo -n launchctl asuser "$(id -u "$QA_ADMIN")" sudo -n -u "$QA_ADMIN" -H "$@"
+}
+
+# RustDesk, started by this job (so macOS counts it under what the image
+# already allows), on the desktop the tester will get.
+start_rustdesk() {
+  if [ "${QA_REMOTE:-rustdesk}" = rustdesk-console ]; then
+    [ "$(stat -f %Su /dev/console)" = "$QA_ADMIN" ] || fail "RustDesk is only started inside $QA_ADMIN's session, and $QA_ADMIN is not the user at the screen."
+    # shellcheck disable=SC2016  # $0 is for the inner shell: the path of RustDesk
+    # (From "/": the job's own folder cannot be read by that user.)
+    in_admin_session /bin/sh -c 'cd / && nohup "$0" >/dev/null 2>&1 &' "$RUSTDESK_BIN"
+  else
+    nohup "$RUSTDESK_BIN" >/dev/null 2>&1 &
+  fi
+}
+
+# RustDesk's ID, asked of the running instance (its socket belongs to the user it runs as).
+rustdesk_id() {
+  if [ "${QA_REMOTE:-rustdesk}" = rustdesk-console ]; then
+    in_admin_session "$RUSTDESK_BIN" --get-id 2>/dev/null | tr -dc '0-9' || true
+  else
+    "$RUSTDESK_BIN" --get-id 2>/dev/null | tr -dc '0-9' || true
+  fi
+}
+
+# Is RustDesk running, as the user it should run as?
+rustdesk_running() {
+  if [ "${QA_REMOTE:-rustdesk}" = rustdesk-console ]; then
+    pgrep -u "$(id -u "$QA_ADMIN" 2>/dev/null || echo 0)" -x RustDesk >/dev/null 2>&1
+  else
+    pgrep -x RustDesk >/dev/null 2>&1
+  fi
+}
+
 case "$QA_STEP" in
 
 kit)
@@ -111,13 +160,27 @@ WEBLOC
   defaults write com.apple.screencapture location "$QA_KIT/Results"
   killall SystemUIServer >/dev/null 2>&1 || true
   say "The QA kit is on the Desktop: $(find "$QA_KIT" -maxdepth 1 -mindepth 1 | wc -l | tr -d ' ') items. PIKY itself is not installed."
-  if [ "${QA_REMOTE:-rustdesk}" = screen-sharing ]; then
-    # Over Screen Sharing the tester signs in as the temporary administrator,
-    # with a desktop of their own: the kit must be somewhere that user can read.
+  if [ "$QA_KIT_IS_SHARED" = yes ]; then
+    # The tester's desktop is the temporary administrator's: the kit must be
+    # somewhere that user can read.
     sudo -n ditto "$QA_KIT" "$QA_SHARED_KIT"
     # That user must be able to save into Results and to delete the END SESSION file.
     sudo -n chmod -R a+rwX "$QA_SHARED_KIT"
     say "A copy of the kit is in $QA_SHARED_KIT for the temporary administrator's own desktop."
+  fi
+  ;;
+
+kit-desktop)
+  runner_only
+  # On the desktop the tester gets: a PIKY-QA folder (a link to the shared kit),
+  # and screenshots taken there (Shift-Command-3 or 4) land in its Results.
+  [ "$(stat -f %Su /dev/console)" = "$QA_ADMIN" ] || fail "$QA_ADMIN is not the user at the screen."
+  sudo -n -u "$QA_ADMIN" ln -sfn "$QA_SHARED_KIT" "/Users/$QA_ADMIN/Desktop/PIKY-QA" || true
+  in_admin_session /usr/bin/defaults write com.apple.screencapture location "$QA_SHARED_KIT/Results" || true
+  if sudo -n test -e "/Users/$QA_ADMIN/Desktop/PIKY-QA/READ ME FIRST.txt"; then
+    say "The QA kit is on $QA_ADMIN's Desktop (PIKY-QA). PIKY itself is not installed."
+  else
+    say "The QA kit is in $QA_SHARED_KIT (it could not be linked on $QA_ADMIN's Desktop)."
   fi
   ;;
 
@@ -199,9 +262,9 @@ rustdesk-start)
   # Started by this job, not through LaunchServices: macOS then counts it as
   # part of GitHub's runner agent, which the image already allows to see the
   # screen and post input. No permission is granted or edited here.
-  nohup "$RUSTDESK_BIN" >/dev/null 2>&1 &
+  start_rustdesk
   QA_WAITED=0
-  until pgrep -x RustDesk >/dev/null 2>&1; do
+  until rustdesk_running; do
     QA_WAITED=$((QA_WAITED + 1)); [ "$QA_WAITED" -lt 40 ] || fail "RustDesk did not start."
     sleep 1
   done
@@ -209,7 +272,7 @@ rustdesk-start)
   RUSTDESK_ID=''
   QA_WAITED=0
   while [ "${#RUSTDESK_ID}" -lt 6 ]; do
-    RUSTDESK_ID="$("$RUSTDESK_BIN" --get-id 2>/dev/null | tr -dc '0-9' || true)"
+    RUSTDESK_ID="$(rustdesk_id)"
     QA_WAITED=$((QA_WAITED + 1)); [ "$QA_WAITED" -lt 30 ] || fail "RustDesk did not report an ID within a minute (no connection to its rendezvous server?)."
     [ "${#RUSTDESK_ID}" -ge 6 ] || sleep 2
   done
@@ -224,7 +287,10 @@ rustdesk-start)
   # Only that password opens a session: no one-time password, no click-to-accept.
   sudo -n "$RUSTDESK_BIN" --option verification-method use-permanent-password >/dev/null 2>&1 || true
   sudo -n "$RUSTDESK_BIN" --option approve-mode password >/dev/null 2>&1 || true
-  ( umask 077; printf 'RUSTDESK_ID=%s\n' "$RUSTDESK_ID" >> "$QA_CREDENTIALS" )
+  # (Started a second time in the same session it keeps its ID: recorded once.)
+  if [ "$(sed -n 's/^RUSTDESK_ID=//p' "$QA_CREDENTIALS" | tail -1)" != "$RUSTDESK_ID" ]; then
+    ( umask 077; printf 'RUSTDESK_ID=%s\n' "$RUSTDESK_ID" >> "$QA_CREDENTIALS" )
+  fi
   # Less for the far side to send: no wallpaper while someone is connected.
   # (Image quality, sound and keyboard mode are chosen on the controlling
   # side; the session note says which.)
@@ -237,12 +303,17 @@ rustdesk-start)
     sleep 5
     QA_CHECKS=$((QA_CHECKS + 1))
     [ "$(pgrep -x RustDesk | head -1)" = "$QA_FIRST_PID" ] || fail "RUSTDESK INTERACTIVE PATH UNRELIABLE: RustDesk stopped or restarted within $((QA_CHECKS * 5)) seconds of starting on macOS $(sw_vers -productVersion). The session is not opened."
-    QA_AGAIN="$("$RUSTDESK_BIN" --get-id 2>/dev/null | tr -dc '0-9' || true)"
+    QA_AGAIN="$(rustdesk_id)"
     [ "$QA_AGAIN" = "$RUSTDESK_ID" ] || fail "RUSTDESK INTERACTIVE PATH UNRELIABLE: RustDesk no longer reports its ID $((QA_CHECKS * 5)) seconds after starting on macOS $(sw_vers -productVersion). The session is not opened."
   done
   say "RustDesk is running, has an ID (masked), accepts the session password, and stood for 60 seconds as one process."
-  # What a job-started program may do on this runner: the same answer RustDesk gets.
-  if [ -x "$QA_TOOLS/qa" ]; then
+  if [ "${QA_REMOTE:-rustdesk}" = rustdesk-console ]; then
+    # Whose it is: every RustDesk process belongs to the temporary administrator, none to the runner.
+    QA_OWNERS="$(ps -axo user=,comm= | awk '$2 ~ /RustDesk.app\/Contents\/MacOS\/RustDesk$/ {print $1}' | sort -u | tr '\n' ' ')"
+    [ "$QA_OWNERS" = "$QA_ADMIN " ] || fail "RustDesk is not running as $QA_ADMIN alone (it runs as: ${QA_OWNERS:-nobody}). The session is not opened."
+    say "RustDesk runs as $QA_ADMIN, inside the session at the screen (/dev/console: $(stat -f %Su /dev/console))."
+  elif [ -x "$QA_TOOLS/qa" ]; then
+    # What a job-started program may do on this runner: the same answer RustDesk gets.
     "$QA_TOOLS/qa" probe | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); print("A program started by this job may: read other apps (Accessibility) %s, post keyboard and pointer input %s, capture the screen %s." % (d.get("accessibilityTrusted"), d.get("postEvents"), d.get("screenCapture")))' || true
   fi
   ;;
@@ -310,6 +381,37 @@ the same name and password. The QA kit is in /Users/Shared/PIKY-QA.
 The password exists only for this session. The Mac is destroyed when it ends.
 NOTE
     )
+  elif [ "${QA_REMOTE:-rustdesk}" = rustdesk-console ]; then
+  ( umask 077
+    cat > "$QA_PLAIN" <<NOTE
+PIKY interactive QA session (the desktop is $QA_ADMIN's own)
+Run:      ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}
+macOS:    $(sw_vers -productVersion) ($(sw_vers -buildVersion)), runner label ${QA_RUNNER_LABEL:-?}
+Open for: ${QA_SESSION_MINUTES:-?} minutes from $(date -u '+%Y-%m-%d %H:%M UTC')
+
+Connect with RustDesk (rustdesk.com, version $RUSTDESK_VERSION or newer):
+  ID:        $RUSTDESK_ID
+  Password:  $RUSTDESK_PASSWORD
+
+Once connected, in the toolbar at the top of the remote window:
+  Display Settings   Optimize reaction time; Mute on; leave "Disable clipboard" off;
+                     Show quality monitor on (it shows delay and whether you are relayed)
+  Keyboard Settings  Translate mode (if a typed key arrives wrong, try Map mode)
+First type a line in TextEdit on the remote Mac. Go on only if every key arrives.
+
+You are logged in at that Mac as $QA_ADMIN, an administrator: the desktop is
+$QA_ADMIN's own. When macOS asks for a password (Open Anyway, Accessibility,
+Screen Recording) it is asking for the user at the screen. TYPE this one
+(12 lowercase letters and digits, no hyphen):
+  User name: $QA_ADMIN
+  Password:  $ADMIN_PASSWORD
+
+The QA kit is the PIKY-QA folder on the Desktop (it lives in /Users/Shared/PIKY-QA).
+To end early, move its "END SESSION - delete this file" to the Trash.
+
+Both passwords exist only for this session. The Mac is destroyed when it ends.
+NOTE
+  )
   else
   ( umask 077
     cat > "$QA_PLAIN" <<NOTE
@@ -362,10 +464,17 @@ keep-alive)
   QA_RESTARTS=0
   say "The session is open for $QA_MINUTES minutes, or until its END SESSION file on the Desktop is deleted."
   while [ "$(date +%s)" -lt "$QA_END" ] && [ -e "$QA_END_FILE" ]; do
-    if [ -x "$RUSTDESK_BIN" ] && ! pgrep -x RustDesk >/dev/null 2>&1; then
-      QA_RESTARTS=$((QA_RESTARTS + 1))
-      say "$(date -u '+%H:%M:%S UTC'): RustDesk was not running: started again (time $QA_RESTARTS)."
-      nohup "$RUSTDESK_BIN" >/dev/null 2>&1 &
+    if [ -x "$RUSTDESK_BIN" ] && ! rustdesk_running; then
+      if [ "${QA_REMOTE:-rustdesk}" = rustdesk-console ] && [ "$(stat -f %Su /dev/console)" != "$QA_ADMIN" ]; then
+        # Never under another account: it waits until that user is at the screen again.
+        if [ "${QA_AWAY:-0}" = 0 ]; then say "$(date -u '+%H:%M:%S UTC'): RustDesk is not running and $QA_ADMIN is not the user at the screen ($(stat -f %Su /dev/console) is). It is not started under another account."; fi
+        QA_AWAY=1
+      else
+        QA_AWAY=0
+        QA_RESTARTS=$((QA_RESTARTS + 1))
+        say "$(date -u '+%H:%M:%S UTC'): RustDesk was not running: started again (time $QA_RESTARTS)."
+        start_rustdesk || true
+      fi
     fi
     QA_NOW="$(date +%s)"
     if [ $((QA_NOW - QA_TOLD)) -ge 300 ]; then
@@ -458,14 +567,36 @@ teardown)
   pkill -x RustDesk >/dev/null 2>&1 || true
   sudo -n pkill -x RustDesk >/dev/null 2>&1 || true
   rm -rf "$RUSTDESK_APP" "$HOME/Library/Preferences/com.carriez.RustDesk" "$HOME/Library/Application Support/RustDesk" "$HOME/Library/Logs/RustDesk"
+  QA_CONSOLE_BEFORE="$(stat -f %Su /dev/console)"
   if id "$QA_ADMIN" >/dev/null 2>&1; then
-    sudo -n /usr/sbin/sysadminctl -deleteUser "$QA_ADMIN" >/dev/null 2>&1 || sudo -n dscl . -delete "/Users/$QA_ADMIN" >/dev/null 2>&1 || true
+    QA_UID="$(id -u "$QA_ADMIN")"
+    # If it is logged in: log it out and end what it left running. Then delete
+    # the account. Right after a logout the directory may refuse once, so it
+    # is asked again, and the account's own record is what is checked.
+    sudo -n launchctl bootout "gui/$QA_UID" >/dev/null 2>&1 || true
+    sleep 3
+    sudo -n pkill -9 -u "$QA_UID" >/dev/null 2>&1 || true
+    sleep 2
+    QA_TRIES=0
+    while dscl . -read "/Users/$QA_ADMIN" UniqueID >/dev/null 2>&1 && [ "$QA_TRIES" -lt 6 ]; do
+      QA_TRIES=$((QA_TRIES + 1))
+      with_limit 60 sudo -n /usr/sbin/sysadminctl -deleteUser "$QA_ADMIN" >/dev/null 2>&1 || true
+      dscl . -read "/Users/$QA_ADMIN" UniqueID >/dev/null 2>&1 || break
+      sudo -n dscl . -delete "/Users/$QA_ADMIN" >/dev/null 2>&1 || true
+      sleep 3
+    done
+    sudo -n dscacheutil -flushcache >/dev/null 2>&1 || true
     sudo -n rm -rf "/Users/$QA_ADMIN"
   fi
+  sudo -n rm -rf /Users/Shared/PIKY-QA-probe
   rm -rf "$QA_STATE" "${GITHUB_WORKSPACE:?}/session-artifact"
   pkill -f '/Applications/PIKY.app/Contents/MacOS/PIKY' >/dev/null 2>&1 || true
-  rm -rf /Applications/PIKY.app "$HOME/Library/Application Support/PIKY"
-  say "RustDesk stopped and removed: $(pgrep -x RustDesk >/dev/null 2>&1 && echo NO || echo yes). Temporary administrator deleted: $(id "$QA_ADMIN" >/dev/null 2>&1 && echo NO || echo yes). Session credentials deleted: $([ -e "$QA_STATE" ] && echo NO || echo yes)."
+  # (PIKY may have been installed by the temporary administrator: its files are not the runner's to remove.)
+  sudo -n rm -rf /Applications/PIKY.app
+  rm -rf "$HOME/Library/Application Support/PIKY"
+  QA_LINE="RustDesk stopped and removed: $(pgrep -x RustDesk >/dev/null 2>&1 && echo NO || echo yes). Temporary administrator deleted: $(dscl . -read "/Users/$QA_ADMIN" UniqueID >/dev/null 2>&1 && echo NO || echo yes) (its home folder removed: $([ -e "/Users/$QA_ADMIN" ] && echo NO || echo yes)). Session credentials deleted: $([ -e "$QA_STATE" ] && echo NO || echo yes). The user at the screen was $QA_CONSOLE_BEFORE and is now $(stat -f %Su /dev/console)."
+  say "$QA_LINE"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '\n%s\n' "$QA_LINE" >> "$GITHUB_STEP_SUMMARY"; fi
   ;;
 
 *)
