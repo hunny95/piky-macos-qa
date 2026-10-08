@@ -190,19 +190,24 @@ def type_at_login_window():
     runner's own session; then the password and Return. As in the probe."""
     # In the probe some twenty seconds passed between the switch and the first key: the login window was ready.
     time.sleep(15.0)
+    # What the watching document holds now. It need not be empty: what counts is whether it CHANGES.
+    # (Run 37743973465 stopped here wrongly: the document still held the word of its own self-test.)
+    before = p.sink_read()
     posted = p.qa("here", "type", p.CANARY, quiet=True).get("_code") == 0
     time.sleep(1.2)
-    sink = p.sink_read() if posted else {"answered": False, "length": -1}
+    after = p.sink_read() if posted else {"answered": False, "length": -1}
     for _ in range(len(p.CANARY) + 3):
         if not posted or p.qa("here", "key", "51", quiet=True).get("_code") != 0:
             break
     time.sleep(0.4)
+    p.log("word typed before the password: characters in the runner's own document before %s, after %s" % (
+        before["length"] if before["answered"] else "no answer", after["length"] if after["answered"] else "no answer"))
     if not posted:
         return False, "the driver could not post keys once the runner's session had left the screen"
-    if sink["answered"] and sink["length"] > 0:
-        return False, "the job's keys stayed in the runner's own session, so the password was not typed"
-    if not sink["answered"]:
-        p.NOTES.append("The document that watches for stray keys in the runner's session did not answer after the switch.")
+    if before["answered"] and after["answered"] and after["length"] != before["length"]:
+        return False, "the job's keys arrived in the runner's own session, so the password was NOT typed"
+    if not (before["answered"] and after["answered"]):
+        p.NOTES.append("The document that watches for stray keys in the runner's session did not answer around the switch.")
     for attempt in (1, 2):
         p.type_password("here")
         if p.logged_in(60):
@@ -253,7 +258,7 @@ def step_login():
     p.sink_close()
     row("Login password accepted", "%s (%s)" % ("PASS" if done else "FAIL", how))
     if not done:
-        return finish("login", "Log in as %s at the screen" % ADMIN, False, "The login window did not accept the password typed by the job.")
+        return finish("login", "Log in as %s at the screen" % ADMIN, False, "The login at macOS's login window did not complete: %s." % how)
     p.S["uid"] = admin_uid()
     good, owner, described = console_is_admin("after-login")
     row("stat -f %Su /dev/console", owner)

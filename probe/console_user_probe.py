@@ -375,10 +375,13 @@ def sink_open():
     qa("here", "key", "51", quiet=True)
     time.sleep(0.5)
     cleared = sink_read()
-    good = typed["answered"] and typed["canary"] and cleared["answered"] and cleared["length"] == 0
+    good = typed["answered"] and typed["canary"]
     log("sink self-test: typed and read back %s, cleared %s" % (typed["canary"], cleared["length"] == 0))
     if not good:
-        NOTES.append("The sink self-test failed before any switch (typed and read back: %s; cleared: %s)." % (typed["canary"], cleared["length"] == 0))
+        NOTES.append("The sink self-test failed before any switch: the word typed was not read back from the document.")
+    elif cleared["length"] != 0:
+        # Whoever asks later must compare with what the document holds then, not expect it empty.
+        NOTES.append("The watching document kept the self-test's word (Command-A, Delete did not empty it).")
     return good
 
 
