@@ -566,7 +566,10 @@ teardown)
   sudo -n rm -rf "$QA_SHARED_KIT"
   pkill -x RustDesk >/dev/null 2>&1 || true
   sudo -n pkill -x RustDesk >/dev/null 2>&1 || true
-  rm -rf "$RUSTDESK_APP" "$HOME/Library/Preferences/com.carriez.RustDesk" "$HOME/Library/Application Support/RustDesk" "$HOME/Library/Logs/RustDesk"
+  # (`sudo RustDesk --password` leaves folders of root's in the runner's home when RustDesk
+  # itself never ran as the runner: they are removed as root, and nothing here may end the
+  # step before the account and the credentials are gone.)
+  sudo -n rm -rf "$RUSTDESK_APP" "$HOME/Library/Preferences/com.carriez.RustDesk" "$HOME/Library/Application Support/RustDesk" "$HOME/Library/Logs/RustDesk" || true
   QA_CONSOLE_BEFORE="$(stat -f %Su /dev/console)"
   if id "$QA_ADMIN" >/dev/null 2>&1; then
     QA_UID="$(id -u "$QA_ADMIN")"
@@ -592,8 +595,8 @@ teardown)
   rm -rf "$QA_STATE" "${GITHUB_WORKSPACE:?}/session-artifact"
   pkill -f '/Applications/PIKY.app/Contents/MacOS/PIKY' >/dev/null 2>&1 || true
   # (PIKY may have been installed by the temporary administrator: its files are not the runner's to remove.)
-  sudo -n rm -rf /Applications/PIKY.app
-  rm -rf "$HOME/Library/Application Support/PIKY"
+  sudo -n rm -rf /Applications/PIKY.app || true
+  rm -rf "$HOME/Library/Application Support/PIKY" || true
   QA_LINE="RustDesk stopped and removed: $(pgrep -x RustDesk >/dev/null 2>&1 && echo NO || echo yes). Temporary administrator deleted: $(dscl . -read "/Users/$QA_ADMIN" UniqueID >/dev/null 2>&1 && echo NO || echo yes) (its home folder removed: $([ -e "/Users/$QA_ADMIN" ] && echo NO || echo yes)). Session credentials deleted: $([ -e "$QA_STATE" ] && echo NO || echo yes). The user at the screen was $QA_CONSOLE_BEFORE and is now $(stat -f %Su /dev/console)."
   say "$QA_LINE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '\n%s\n' "$QA_LINE" >> "$GITHUB_STEP_SUMMARY"; fi
