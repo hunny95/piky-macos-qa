@@ -4,7 +4,8 @@
 # RustDesk runs inside that session, never under the runner's own account.
 #
 # Why: on macOS 26, Gatekeeper's Open Anyway asks for the password of the user
-# who owns the desktop. On the runner's own desktop nobody knows it.
+# who owns the desktop. On the runner's own desktop nobody knows it. The same
+# session can be opened on macOS 15, so that both are tested the same way.
 #
 # Started by hand only, by the owner of this repository only, on a standard
 # GitHub-hosted Apple silicon runner (free for a public repository). It needs
@@ -16,6 +17,11 @@ name: Interactive macOS QA (own desktop)
 on:
   workflow_dispatch:
     inputs:
+      macos_version:
+        description: 'macOS (one session at a time)'
+        type: choice
+        options: ['26', '15']
+        default: '26'
       session_minutes:
         description: 'How long the Mac stays up once it is ready, in minutes (5 to 120)'
         type: string
@@ -35,14 +41,14 @@ concurrency:
 
 jobs:
   session:
-    name: Interactive QA on macOS 26, on the temporary administrator's own desktop
+    name: Interactive QA on macOS ${{ inputs.macos_version }}, on the temporary administrator's own desktop
     if: github.actor == github.repository_owner
-    runs-on: macos-26
+    runs-on: macos-${{ inputs.macos_version }}
     timeout-minutes: 180
     env:
       NO_COLOR: '1'
       QA_REMOTE: rustdesk-console
-      QA_RUNNER_LABEL: macos-26
+      QA_RUNNER_LABEL: macos-${{ inputs.macos_version }}
       QA_SESSION_MINUTES: ${{ inputs.session_minutes }}
       QA_TOOLS: ${{ github.workspace }}/build
       QA_OUT: ${{ github.workspace }}/evidence/setup
@@ -66,8 +72,8 @@ jobs:
           if [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "$(uname -m)" != arm64 ]; then
             echo "::error::This workflow runs on standard GitHub-hosted Apple silicon runners only."; exit 1
           fi
-          if [ "$(sw_vers -productVersion | cut -d. -f1)" != 26 ]; then
-            echo "::error::Asked for macOS 26 but this machine is macOS $(sw_vers -productVersion)."; exit 1
+          if [ "$(sw_vers -productVersion | cut -d. -f1)" != "${QA_RUNNER_LABEL#macos-}" ]; then
+            echo "::error::Asked for $QA_RUNNER_LABEL but this machine is macOS $(sw_vers -productVersion)."; exit 1
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -165,7 +171,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: piky-interactive-qa-macos-26-own-desktop-run${{ github.run_number }}
+          name: piky-interactive-qa-macos-${{ inputs.macos_version }}-own-desktop-run${{ github.run_number }}
           path: evidence/
           if-no-files-found: warn
           retention-days: 30
