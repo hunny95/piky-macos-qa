@@ -1,0 +1,41 @@
+name: Site monitor
+
+# Every half hour, from outside: getpiky.com, the release record, the update
+# feed, the Download link and the file on GitHub agree and answer
+# (tools/monitor/site_monitor.py). Counts nothing on the site. A failure fails
+# the run (GitHub emails whoever last changed this schedule) and, when the
+# NTFY_TOPIC secret is set, pushes one alert to that ntfy topic.
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check getpiky.com, the feed and the release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PIKY_MONITOR_FAILED: ${{ runner.temp }}/failed.txt
+        run: python3 tools/monitor/site_monitor.py
+      - name: Alert
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          FAILED_FILE: ${{ runner.temp }}/failed.txt
+        run: |
+          [ -n "$NTFY_TOPIC" ] || { echo "No NTFY_TOPIC secret: GitHub's failure email is the alert."; exit 0; }
+          message="$(cat "$FAILED_FILE" 2>/dev/null || echo 'the monitor could not run')"
+          curl -fsS --max-time 15 -H "Title: PIKY: getpiky.com check failed" -H "Priority: high" -H "Tags: warning" \
+            -H "Click: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d "$message" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
